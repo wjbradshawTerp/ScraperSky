@@ -7,4 +7,17 @@ Scraper system for MurkySky expansion
 3. `poetry install`
 4. `poetry run playwright install chromium`
 5. Copy `.env.example`, making a new file `.env`. Fill in `.env` with your information.
-6. Run the scraper with `poetry run python src/main.py --platform twitter`
+
+# Running a scraper
+Basic run
+`poetry run python src/main.py --platform twitter`
+
+Run with keywords
+`poetry run python src/main.py --platform twitter --keywords "new york times, fox news"`
+
+Run with date range
+`poetry run python src/main.py --platform twitter --start-date 2023-01-01 --end-date 2023-12-31`
+Both start date and end date must be used
+
+Run with keywords and date range
+`poetry run python src/main.py --platform twitter --keywords "new york times, fox news" --start-date 2023-01-01 --end-date 2023-12-31`
