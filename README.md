@@ -10,14 +10,22 @@ Scraper system for MurkySky expansion
 
 # Running a scraper
 Basic run
-`poetry run python src/main.py --platform twitter`
+```cmd
+poetry run python src/main.py --platform twitter
+```
 
 Run with keywords
-`poetry run python src/main.py --platform twitter --keywords "new york times, fox news"`
+```cmd
+poetry run python src/main.py --platform twitter --keywords "new york times, fox news"
+```
 
 Run with date range
-`poetry run python src/main.py --platform twitter --start-date 2023-01-01 --end-date 2023-12-31`
+```cmd
+poetry run python src/main.py --platform twitter --start-date 2023-01-01 --end-date 2023-12-31
+```
 Both start date and end date must be used
 
 Run with keywords and date range
-`poetry run python src/main.py --platform twitter --keywords "new york times, fox news" --start-date 2023-01-01 --end-date 2023-12-31`
+```cmd
+poetry run python src/main.py --platform twitter --keywords "new york times, fox news" --start-date 2023-01-01 --end-date 2023-12-31
+```
