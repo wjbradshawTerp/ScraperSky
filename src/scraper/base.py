@@ -1,25 +1,19 @@
 from abc import ABC, abstractmethod
-from datetime import datetime
-from typing import List, Optional
 
 
 class BaseScraper(ABC):
     def __init__(
         self,
-        keywords: Optional[List[str]] = None,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
+        mode: str,
     ):
-        self.keywords = keywords
-        self.start_date = start_date
-        self.end_date = end_date
+        self.mode = mode
 
     @abstractmethod
     def run(self):
         pass
 
     @abstractmethod
-    def scrape_keywords(self):
+    def scrape_home(self):
         pass
 
     @abstractmethod

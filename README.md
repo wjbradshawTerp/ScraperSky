@@ -1,31 +1,30 @@
 # ScraperSky
-Scraper system for MurkySky expansion
+X/Twitter bot and scraping system for the UMD iSchool
+
+## Requirements
+[Docker Engine] (https://docs.docker.com/engine/install)
 
 ## Installation
-1. Clone repo.
-2. `cd ScraperSky`
-3. `poetry install`
-4. `poetry run playwright install chromium`
-5. Copy `.env.example`, making a new file `.env`. Fill in `.env` with your information.
-
-# Running a scraper
-Basic run
-```cmd
-poetry run python src/main.py --platform twitter
+1. Clone repo:
+```bash
+git clone https://github.com/your-username/ScraperSky.git
+cd ScraperSky
+```
+2. Create env file:
+```bash
+cp .env.example .env
+```
+3. Open .env and enter:
+```
+TWITTER_AUTH_TOKEN
+TWITTER_BEARER_TOKEN
+TWITTER_CSRF_TOKEN
 ```
 
-Run with keywords
-```cmd
-poetry run python src/main.py --platform twitter --keywords "new york times, fox news"
-```
+## Where to find credentials
+To get TWITTER_AUTH_TOKEN, TWITTER_BEARER_TOKEN, TWITTER_CSRF_TOKEN, open your Twitter account on desktop.
 
-Run with date range
-```cmd
-poetry run python src/main.py --platform twitter --start-date 2023-01-01 --end-date 2023-12-31
-```
-Both start date and end date must be used
 
-Run with keywords and date range
-```cmd
-poetry run python src/main.py --platform twitter --keywords "new york times, fox news" --start-date 2023-01-01 --end-date 2023-12-31
-```
+## Running a scraper
+
+### Option 1: Using Docker

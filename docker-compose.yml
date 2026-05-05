@@ -1,0 +1,9 @@
+services:
+  app:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - OUTPUT_DIR=${CONTAINER_OUTPUT_DIR}
+    volumes:
+      - ${HOST_OUTPUT_DIR}:${CONTAINER_OUTPUT_DIR}
