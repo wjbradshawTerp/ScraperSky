@@ -27,6 +27,8 @@ class TwitterScraper(BaseScraper):
             },
             timeout=30,
         )
+        
+        self.follow_user("44196397")
 
         if self.mode == "home":
             self.scrape_home()
@@ -116,6 +118,49 @@ class TwitterScraper(BaseScraper):
             raise
 
         return data
+
+    def follow_user(self, user_id: str):
+        url = f"https://x.com/i/api/1.1/friendships/create.json"
+
+        follow_headers = {
+            "authorization": settings.TWITTER_BEARER_TOKEN,
+            "x-csrf-token": settings.TWITTER_CSRF_TOKEN,
+            "x-twitter-active-user": "yes",
+            "x-twitter-client-language": "en",
+            "cookie": f"auth_token={settings.TWITTER_AUTH_TOKEN}; ct0={settings.TWITTER_CSRF_TOKEN}",
+            "user-agent": "Mozilla/5.0",
+            "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
+            "content-type": "application/x-www-form-urlencoded",
+            "origin": "https://x.com",
+            "referer": "https://x.com/",
+            "x-twitter-auth-type": "OAuth2Session",
+        }
+
+        payload = {
+            "include_profile_interstitial_type": "1",
+            "include_blocking": "1",
+            "include_blocked_by": "1",
+            "include_followed_by": "1",
+            "include_want_retweets": "1",
+            "include_mute_edge": "1",
+            "include_can_dm": "1",
+            "include_can_media_tag": "1",
+            "include_ext_is_blue_verified": "1",
+            "include_ext_verified_type": "1",
+            "include_ext_profile_image_shape": "1",
+            "skip_status": "1",
+            "user_id": user_id,
+        }
+
+        r = self.client.post(url, data=payload, headers=follow_headers)
+
+        try:
+            return r.json()
+        except Exception:
+            print("NON JSON RESPONSE:")
+            print(r.text[:500])
+            raise
 
 
 def parse_follow_timeline(data):
