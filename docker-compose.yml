@@ -7,3 +7,4 @@ services:
       - OUTPUT_DIR=${CONTAINER_OUTPUT_DIR}
     volumes:
       - ${HOST_OUTPUT_DIR}:${CONTAINER_OUTPUT_DIR}
+      - .:/app
