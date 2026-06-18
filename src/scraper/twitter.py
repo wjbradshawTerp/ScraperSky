@@ -1,8 +1,8 @@
 import httpx
-import http.client
 import time
 import json
 from scraper.base import BaseScraper
+from scraper.x_client import fetch_and_init
 from config import settings
 from storage.file_manager import FileManager
 
@@ -19,20 +19,26 @@ class TwitterScraper(BaseScraper):
 
         self.file_manager = FileManager(settings.OUTPUT_DIR, "twitter", self.mode)
 
+        print("Initialising x-client-transaction-id generator...")
+        self.ct = fetch_and_init()
+        print("Transaction generator ready.")
+
         self.client = httpx.Client(
             headers={
                 "authorization": settings.TWITTER_BEARER_TOKEN,
                 "x-csrf-token": settings.TWITTER_CSRF_TOKEN,
                 "x-twitter-active-user": "yes",
                 "x-twitter-client-language": "en",
+                "x-twitter-auth-type": "OAuth2Session",
                 "cookie": f"auth_token={settings.TWITTER_AUTH_TOKEN}; ct0={settings.TWITTER_CSRF_TOKEN}",
-                "user-agent": "Mozilla/5.0",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                "origin": "https://x.com",
+                "referer": "https://x.com/home",
             },
             timeout=30,
         )
-        
-        self.favorite_tweet("2063797483629629691")
-        self.mute_user("13298072")
+
+        self.follow_all()
 
         if self.mode == "home":
             self.scrape_home()
@@ -123,121 +129,82 @@ class TwitterScraper(BaseScraper):
 
         return data
 
-    # Clean this and mute up, they fucking disgusting bro
+    def _txid(self, method: str, path: str) -> str:
+        return self.ct.generate(method, path)
+
     def favorite_tweet(self, tweet_id: str):
-        conn = http.client.HTTPSConnection("x.com")
-        headers = {
-            "accept": "*/*",
-            "accept-language": "en-US,en;q=0.9",
-            "authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
-            "content-type": "application/json",
-            "origin": "https://x.com",
-            "priority": "u=1, i",
-            "referer": "https://x.com/home",
-            "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-            "x-csrf-token": "6d0554423a95c3ff492556b40af5d8c252425a12fbb8267290379fd24c99898586ed6016e5cf19217574dc21be55c488fcc50556f4144be1cebd3ffcf18d939b2a331bddb9d988cbfed5577a7e9ee5e2",
-            "x-twitter-active-user": "yes",
-            "x-twitter-auth-type": "OAuth2Session",
-            "x-twitter-client-language": "en",
-            "cookie": 'night_mode=2; guest_id=v1%3A176765025551579069; guest_id_marketing=v1%3A176765025551579069; guest_id_ads=v1%3A176765025551579069; __cuid=e73544982ab9463a902eea7a266132cc; kdt=Wp1rqsJgBz48Pv70RDpKgiRaLFFdSQunr6WDZoIN; _ga_KEWZ1G5MB3=GS2.2.s1767902968$o1$g1$t1767903177$j60$l0$h0; _ga=GA1.1.1582729253.1767902597; _ga_RJGMY4G45L=GS2.1.s1767902597$o1$g1$t1767903887$j60$l0$h0; personalization_id="v1_M/JjNXndIUT6LBdPANLzDQ=="; g_state={"i_l":0,"i_ll":1769620525840}; auth_token=1e5f32f9cd453a287e69cf5944f0bf58eb68deb0; ct0=6d0554423a95c3ff492556b40af5d8c252425a12fbb8267290379fd24c99898586ed6016e5cf19217574dc21be55c488fcc50556f4144be1cebd3ffcf18d939b2a331bddb9d988cbfed5577a7e9ee5e2; twid=u%3D2009357161542090752; _twpid=tw.1776900248126.192889039345785615; lang=en; __cuid=e73544982ab9463a902eea7a266132cc; __cf_bm=qRojvqQlOZP83CMc_MR8B8dw2gZ1K.Mwh6BroBZsE_k-1780959913.7579544-1.0.1.1-Sz8x.PEgGbI0K1KV9CigWpd20Lig_ts2EtDTC9UgIF39g0SgZbb6gKWzGVX152H3HMiyO6HxsNHE_uGeUwcWULYwQXqj00rSu3moMZnb.gBTK5Nx6TrHD5HNF7TuwBrS; external_referer=padhuUp37zjgzgv1mFWxJ12Ozwit7owX|0|8e8t2xd8A2w%3D; __gads=ID=911e5c8f2a98b584:T=1780959918:RT=1780959918:S=ALNI_MY01w-U9S7SGl55gUJmtgwor_N4KQ; __gpi=UID=000013c218398b1c:T=1780959918:RT=1780959918:S=ALNI_MYtXfiuDWH5O6Ub6pdVOkIfaRrnOw; __eoi=ID=ffcf43431e50ec40:T=1780959918:RT=1780959918:S=AA-AfjY5o5ouju0dEJzRDjEMK8oG',
-        }
-        json_data = {
-            "variables": {
-                "tweet_id": f'{tweet_id}',
+        path = "/i/api/graphql/lI07N6Otwv1PhnEgXILM7A/FavoriteTweet"
+        r = self.client.post(
+            f"https://x.com{path}",
+            headers={
+                "x-client-transaction-id": self._txid("POST", path),
+                "content-type": "application/json",
             },
-            "queryId": "lI07N6Otwv1PhnEgXILM7A",
-        }
-        conn.request(
-            "POST",
-            "/i/api/graphql/lI07N6Otwv1PhnEgXILM7A/FavoriteTweet",
-            json.dumps(json_data),
-            # '{"variables":{"tweet_id":"2063797483629629691"},"queryId":"lI07N6Otwv1PhnEgXILM7A"}',
-            headers,
+            content=json.dumps(
+                {
+                    "variables": {"tweet_id": tweet_id},
+                    "queryId": "lI07N6Otwv1PhnEgXILM7A",
+                }
+            ),
         )
-        response = conn.getresponse()
-        print(response.status, response.reason)
-        
+        print(r.status_code, r.reason_phrase)
+
     def mute_user(self, user_id: str):
-        conn = http.client.HTTPSConnection('x.com')
-        headers = {
-            'accept': '*/*',
-            'accept-language': 'en-US,en;q=0.9',
-            'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
-            'content-type': 'application/x-www-form-urlencoded',
-            'origin': 'https://x.com',
-            'priority': 'u=1, i',
-            'referer': 'https://x.com/home',
-            'sec-ch-ua': '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-origin',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-            'x-csrf-token': '6d0554423a95c3ff492556b40af5d8c252425a12fbb8267290379fd24c99898586ed6016e5cf19217574dc21be55c488fcc50556f4144be1cebd3ffcf18d939b2a331bddb9d988cbfed5577a7e9ee5e2',
-            'x-twitter-active-user': 'yes',
-            'x-twitter-auth-type': 'OAuth2Session',
-            'x-twitter-client-language': 'en',
-            'cookie': 'night_mode=2; guest_id=v1%3A176765025551579069; guest_id_marketing=v1%3A176765025551579069; guest_id_ads=v1%3A176765025551579069; __cuid=e73544982ab9463a902eea7a266132cc; kdt=Wp1rqsJgBz48Pv70RDpKgiRaLFFdSQunr6WDZoIN; _ga_KEWZ1G5MB3=GS2.2.s1767902968$o1$g1$t1767903177$j60$l0$h0; _ga=GA1.1.1582729253.1767902597; _ga_RJGMY4G45L=GS2.1.s1767902597$o1$g1$t1767903887$j60$l0$h0; personalization_id="v1_M/JjNXndIUT6LBdPANLzDQ=="; g_state={"i_l":0,"i_ll":1769620525840}; auth_token=1e5f32f9cd453a287e69cf5944f0bf58eb68deb0; ct0=6d0554423a95c3ff492556b40af5d8c252425a12fbb8267290379fd24c99898586ed6016e5cf19217574dc21be55c488fcc50556f4144be1cebd3ffcf18d939b2a331bddb9d988cbfed5577a7e9ee5e2; twid=u%3D2009357161542090752; _twpid=tw.1776900248126.192889039345785615; lang=en; __cuid=e73544982ab9463a902eea7a266132cc; external_referer=padhuUp37zjgzgv1mFWxJ12Ozwit7owX|0|8e8t2xd8A2w%3D; __cf_bm=BMxzUMRa9aow8mi9ZEw3Et.cJHxK4QNieKxv7V0U1Js-1780960813.4330463-1.0.1.1-kGvRuBsfqNBphqJQWykl0oD.H7BMe2ppfECbwdB5Xgxq54Y0hbqkaA_jU1gNNaQ58fpua.8W1kdJ0QkNb3U0KYWnUWFv14BtX7C84b273vdh3aXkAFWkG6jO3P7gRFzC; __gads=ID=911e5c8f2a98b584:T=1780959918:RT=1780961480:S=ALNI_MY01w-U9S7SGl55gUJmtgwor_N4KQ; __gpi=UID=000013c218398b1c:T=1780959918:RT=1780961480:S=ALNI_MYtXfiuDWH5O6Ub6pdVOkIfaRrnOw; __eoi=ID=ffcf43431e50ec40:T=1780959918:RT=1780961480:S=AA-AfjY5o5ouju0dEJzRDjEMK8oG',
-        }
-        conn.request(
-            'POST',
-            '/i/api/1.1/mutes/users/create.json',
-            f'user_id={user_id}',
-            headers
+        path = "/i/api/1.1/mutes/users/create.json"
+        r = self.client.post(
+            f"https://x.com{path}",
+            headers={
+                "x-client-transaction-id": self._txid("POST", path),
+                "content-type": "application/x-www-form-urlencoded",
+            },
+            content=f"user_id={user_id}",
         )
-        response = conn.getresponse()
-        print(response.status, response.reason)
+        print(r.status_code, r.reason_phrase)
 
-    # This also throws 403, need x-client-transaction-id :(
-    def follow_user(self, user_id: str):
-        conn = http.client.HTTPSConnection("x.com")
-        headers = {
-            "accept": "*/*",
-            "accept-language": "en-US,en;q=0.9",
-            "authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
-            "content-type": "application/x-www-form-urlencoded",
-            "origin": "https://x.com",
-            "priority": "u=1, i",
-            "referer": "https://x.com/NASA",
-            "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-            "x-client-transaction-id": "DWURcUaFanJue6h533LznXR+cjpMiY6Fa9pp+0n/cLr+COlJRU4vn6VsJdlfaZKxOf/VxAj3Jd8nh8lw1Pe/5+9eI+gQDg",
-            "x-csrf-token": "6d0554423a95c3ff492556b40af5d8c252425a12fbb8267290379fd24c99898586ed6016e5cf19217574dc21be55c488fcc50556f4144be1cebd3ffcf18d939b2a331bddb9d988cbfed5577a7e9ee5e2",
-            "x-twitter-active-user": "yes",
-            "x-twitter-auth-type": "OAuth2Session",
-            "x-twitter-client-language": "en",
-            "cookie": 'night_mode=2; guest_id=v1%3A176765025551579069; guest_id_marketing=v1%3A176765025551579069; guest_id_ads=v1%3A176765025551579069; __cuid=e73544982ab9463a902eea7a266132cc; kdt=Wp1rqsJgBz48Pv70RDpKgiRaLFFdSQunr6WDZoIN; _ga_KEWZ1G5MB3=GS2.2.s1767902968$o1$g1$t1767903177$j60$l0$h0; _ga=GA1.1.1582729253.1767902597; _ga_RJGMY4G45L=GS2.1.s1767902597$o1$g1$t1767903887$j60$l0$h0; personalization_id="v1_M/JjNXndIUT6LBdPANLzDQ=="; g_state={"i_l":0,"i_ll":1769620525840}; auth_token=1e5f32f9cd453a287e69cf5944f0bf58eb68deb0; ct0=6d0554423a95c3ff492556b40af5d8c252425a12fbb8267290379fd24c99898586ed6016e5cf19217574dc21be55c488fcc50556f4144be1cebd3ffcf18d939b2a331bddb9d988cbfed5577a7e9ee5e2; twid=u%3D2009357161542090752; _twpid=tw.1776900248126.192889039345785615; lang=en; __cuid=e73544982ab9463a902eea7a266132cc; __cf_bm=cASzBSq7OirP1FBg2Zb8v5.AWBuB8jDALnFYQfawI9M-1780038758.1754198-1.0.1.1-yPfsFJmerO0G_iHPxGGrgY3IL4Vr88_Qbkh53kapTj5hnir21vOS4jkcdCGVS_b6rFqcEWrwvIvWpPdu0DNnPPewyZZ3ayylie8PbKLflR31POLa0rTMys7SfPRF.fel',
-        }
-        conn.request(
-            "POST",
-            "/i/api/1.1/friendships/create.json",
-            f"include_profile_interstitial_type=1&include_blocking=1&include_blocked_by=1&include_followed_by=1&include_want_retweets=1&include_mute_edge=1&include_can_dm=1&include_can_media_tag=1&include_ext_is_blue_verified=1&include_ext_verified_type=1&include_ext_profile_image_shape=1&skip_status=1&user_id={user_id}",
-            headers,
+    def follow_user(self, user_id: str) -> bool:
+        """Returns True on success, False on rate-limit, raises on other errors."""
+        path = "/i/api/1.1/friendships/create.json"
+        body = (
+            "include_profile_interstitial_type=1&include_blocking=1&include_blocked_by=1"
+            "&include_followed_by=1&include_want_retweets=1&include_mute_edge=1"
+            "&include_can_dm=1&include_can_media_tag=1&include_ext_is_blue_verified=1"
+            "&include_ext_verified_type=1&include_ext_profile_image_shape=1"
+            f"&skip_status=1&user_id={user_id}"
         )
-        response = conn.getresponse()
-        print(response.status, response.reason)
+        txid = self._txid("POST", path)
+        r = self.client.post(
+            f"https://x.com{path}",
+            headers={
+                "x-client-transaction-id": txid,
+                "content-type": "application/x-www-form-urlencoded",
+            },
+            content=body,
+        )
+        print(r.status_code, r.reason_phrase)
+        if r.status_code == 429:
+            reset = r.headers.get("x-rate-limit-reset")
+            limit = r.headers.get("x-rate-limit-limit")
+            remaining = r.headers.get("x-rate-limit-remaining")
+            print(f"  Rate limited — limit={limit}, remaining={remaining}, resets_at={reset}")
+            if reset:
+                import datetime
+                reset_dt = datetime.datetime.fromtimestamp(int(reset), tz=datetime.timezone.utc)
+                print(f"  Reset time (UTC): {reset_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            return False
+        if r.status_code != 200:
+            print(f"  response: {r.text[:500]}")
+        return r.status_code == 200
 
-    # Currently throws 403 for multiple users, but worked on single user. How fix ::think::
     def follow_all(self):
         with open(FILE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        for user_id in data["users"]:
-            print(f"Following user {user_id}...")
-            self.follow_user(user_id)
-            time.sleep(1)
+        for entry in data["users"]:
+            user_id = entry["user_id"]
+            print(f"Following user {user_id} ({entry.get('_comment', '')})...")
+            if not self.follow_user(user_id):
+                break
+            time.sleep(5)
 
 
 def parse_follow_timeline(data):

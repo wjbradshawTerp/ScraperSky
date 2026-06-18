@@ -9,7 +9,8 @@ readme = "README.md"
 python = "^3.12"
 python-dotenv = "^1.2.1"
 httpx = "^0.28.1"
-xclienttransaction = "^1.0.2"
+beautifulsoup4 = ">=4.12"
+lxml = ">=5.0"
 
 
 [build-system]
