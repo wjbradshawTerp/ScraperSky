@@ -1,3 +1,4 @@
+import datetime
 import httpx
 import time
 import json
@@ -5,8 +6,6 @@ from scraper.base import BaseScraper
 from scraper.x_client import fetch_and_init
 from config import settings
 from storage.file_manager import FileManager
-
-FILE_PATH = "/app/follow_user_ids.json"
 
 TWITTER_HOME_LATEST_TIMELINE_HASH = "KLMY6cZZUfQrLubs5DHHtQ"
 TWITTER_HOME_TIMELINE_HASH = "L8Lb9oomccM012S7fQ-QKA"
@@ -38,101 +37,89 @@ class TwitterScraper(BaseScraper):
             timeout=30,
         )
 
-        self.follow_all()
-
-        if self.mode == "home":
-            self.scrape_home()
-        elif self.mode == "follows":
+        if self.mode == "follows":
+            self.follow_all()
             self.scrape_follows()
+        elif self.mode == "home":
+            self.scrape_home()
 
     def scrape_home(self):
         print("Scraping Twitter home timeline.")
-
-        cursor = None
-        num_tweets = 0
-
-        while True:
-            data = self.fetch_home_latest(cursor)
-            time.sleep(settings.SCROLL_DELAY)
-            tweets, cursor = parse_home_timeline(data)
-            num_tweets += len(tweets)
-            print(f"{num_tweets} tweets collected")
-
-            self.file_manager.save_data(tweets)
+        self._scrape_timeline(self.fetch_home_latest, TWITTER_HOME_TIMELINE_HASH)
 
     def scrape_follows(self):
         print("Scraping Twitter for all tweets from followed accounts.")
+        self._scrape_timeline(
+            self.fetch_follow_latest, TWITTER_HOME_LATEST_TIMELINE_HASH
+        )
 
+    def _scrape_timeline(self, fetch_fn, _hash):
         cursor = None
         num_tweets = 0
 
         while True:
-            data = self.fetch_follow_latest(cursor)
+            data = fetch_fn(cursor)
             time.sleep(settings.SCROLL_DELAY)
-            tweets, cursor = parse_follow_timeline(data)
+            tweets, next_cursor = parse_timeline(data)
             num_tweets += len(tweets)
             print(f"{num_tweets} tweets collected")
-
             self.file_manager.save_data(tweets)
+
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+    def _fetch_timeline(self, url, cursor):
+        variables = {
+            "count": 20,
+            "includePromotedContent": True,
+            "latestControlAvailable": True,
+            "withVoice": True,
+        }
+        if cursor:
+            variables["cursor"] = cursor
+
+        params = {
+            "variables": json.dumps(variables),
+            "features": json.dumps({}),
+        }
+
+        r = self.client.get(url, params=params)
+
+        try:
+            return r.json()
+        except Exception:
+            print("NON JSON RESPONSE:")
+            print(r.text[:500])
+            raise
 
     def fetch_follow_latest(self, cursor=None):
         url = f"https://x.com/i/api/graphql/{TWITTER_HOME_LATEST_TIMELINE_HASH}/HomeLatestTimeline"
-
-        variables = {
-            "count": 20,
-            "cursor": cursor,
-            "includePromotedContent": True,
-            "latestControlAvailable": True,
-            "withVoice": True,
-        }
-
-        params = {
-            "variables": json.dumps(variables),
-            "features": json.dumps({}),
-        }
-
-        r = self.client.get(url, params=params)
-
-        try:
-            data = r.json()
-        except Exception:
-            print("NON JSON RESPONSE:")
-            print(r.text[:500])
-            raise
-
-        return data
+        return self._fetch_timeline(url, cursor)
 
     def fetch_home_latest(self, cursor=None):
         url = f"https://x.com/i/api/graphql/{TWITTER_HOME_TIMELINE_HASH}/HomeTimeline"
-
-        variables = {
-            "count": 20,
-            "cursor": cursor,
-            "includePromotedContent": True,
-            "latestControlAvailable": True,
-            "withVoice": True,
-        }
-
-        params = {
-            "variables": json.dumps(variables),
-            "features": json.dumps({}),
-        }
-
-        r = self.client.get(url, params=params)
-
-        try:
-            data = r.json()
-        except Exception:
-            print("NON JSON RESPONSE:")
-            print(r.text[:500])
-            raise
-
-        return data
+        return self._fetch_timeline(url, cursor)
 
     def _txid(self, method: str, path: str) -> str:
         return self.ct.generate(method, path)
 
-    def favorite_tweet(self, tweet_id: str):
+    def _handle_rate_limit(self, r) -> bool:
+        """Prints rate limit info and returns True if rate limited."""
+        if r.status_code != 429:
+            return False
+        reset = r.headers.get("x-rate-limit-reset")
+        limit = r.headers.get("x-rate-limit-limit")
+        remaining = r.headers.get("x-rate-limit-remaining")
+        print(f"Rate limited — limit={limit}, remaining={remaining}, resets_at={reset}")
+        if reset:
+            reset_dt = datetime.datetime.fromtimestamp(
+                int(reset), tz=datetime.timezone.utc
+            )
+            print(f"Reset time (UTC): {reset_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        return True
+
+    def favorite_tweet(self, tweet_id: str) -> bool:
         path = "/i/api/graphql/lI07N6Otwv1PhnEgXILM7A/FavoriteTweet"
         r = self.client.post(
             f"https://x.com{path}",
@@ -148,8 +135,13 @@ class TwitterScraper(BaseScraper):
             ),
         )
         print(r.status_code, r.reason_phrase)
+        if self._handle_rate_limit(r):
+            return False
+        if r.status_code != 200:
+            print(f"response: {r.text[:500]}")
+        return r.status_code == 200
 
-    def mute_user(self, user_id: str):
+    def mute_user(self, user_id: str) -> bool:
         path = "/i/api/1.1/mutes/users/create.json"
         r = self.client.post(
             f"https://x.com{path}",
@@ -160,9 +152,13 @@ class TwitterScraper(BaseScraper):
             content=f"user_id={user_id}",
         )
         print(r.status_code, r.reason_phrase)
+        if self._handle_rate_limit(r):
+            return False
+        if r.status_code != 200:
+            print(f"response: {r.text[:500]}")
+        return r.status_code == 200
 
     def follow_user(self, user_id: str) -> bool:
-        """Returns True on success, False on rate-limit, raises on other errors."""
         path = "/i/api/1.1/friendships/create.json"
         body = (
             "include_profile_interstitial_type=1&include_blocking=1&include_blocked_by=1"
@@ -171,32 +167,24 @@ class TwitterScraper(BaseScraper):
             "&include_ext_verified_type=1&include_ext_profile_image_shape=1"
             f"&skip_status=1&user_id={user_id}"
         )
-        txid = self._txid("POST", path)
         r = self.client.post(
             f"https://x.com{path}",
             headers={
-                "x-client-transaction-id": txid,
+                "x-client-transaction-id": self._txid("POST", path),
                 "content-type": "application/x-www-form-urlencoded",
             },
             content=body,
         )
         print(r.status_code, r.reason_phrase)
-        if r.status_code == 429:
-            reset = r.headers.get("x-rate-limit-reset")
-            limit = r.headers.get("x-rate-limit-limit")
-            remaining = r.headers.get("x-rate-limit-remaining")
-            print(f"  Rate limited — limit={limit}, remaining={remaining}, resets_at={reset}")
-            if reset:
-                import datetime
-                reset_dt = datetime.datetime.fromtimestamp(int(reset), tz=datetime.timezone.utc)
-                print(f"  Reset time (UTC): {reset_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        if self._handle_rate_limit(r):
             return False
         if r.status_code != 200:
-            print(f"  response: {r.text[:500]}")
-        return r.status_code == 200
+            print(f"response: {r.text[:500]}")
+            return False
+        return True
 
     def follow_all(self):
-        with open(FILE_PATH, "r", encoding="utf-8") as f:
+        with open(settings.FOLLOW_LIST_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         for entry in data["users"]:
@@ -207,46 +195,43 @@ class TwitterScraper(BaseScraper):
             time.sleep(5)
 
 
-def parse_follow_timeline(data):
-
+def parse_timeline(data):
     tweets = []
     next_cursor = None
 
-    instructions = data["data"]["home"]["home_timeline_urt"]["instructions"]
+    if "errors" in data:
+        for err in data["errors"]:
+            print(f"API error {err.get('code')}: {err.get('message')}")
+        return tweets, next_cursor
+
+    try:
+        instructions = data["data"]["home"]["home_timeline_urt"]["instructions"]
+    except KeyError:
+        print(f"Unexpected response structure: {json.dumps(data)[:300]}")
+        return tweets, next_cursor
 
     for instruction in instructions:
-
         if "entries" not in instruction:
             continue
 
         for entry in instruction["entries"]:
-
             entry_id = entry["entryId"]
 
-            # tweet
             if entry_id.startswith("tweet-"):
                 try:
-                    content = entry.get("content", {})
-
                     tweet_data = (
                         entry.get("content", {})
                         .get("itemContent", {})
                         .get("tweet_results", {})
                         .get("result")
                     )
-
                     if tweet_data:
                         tweets.append(build_tweet_object(tweet_data))
-
                 except Exception as e:
                     print("Error parsing tweet entry:", e)
-                    continue
 
-            # Module with multiple tweets
-            if entry_id.startswith("home-conversation-"):
-                content = entry.get("content", {})
-
-                for item in content["items"]:
+            elif entry_id.startswith("home-conversation-"):
+                for item in entry.get("content", {}).get("items", []):
                     try:
                         tweet_data = (
                             item.get("item", {})
@@ -254,78 +239,12 @@ def parse_follow_timeline(data):
                             .get("tweet_results", {})
                             .get("result")
                         )
-
                         if tweet_data:
                             tweets.append(build_tweet_object(tweet_data))
-
                     except Exception as e:
                         print("Error parsing module tweet:", e)
-                        continue
 
-            # cursor
-            if entry_id.startswith("cursor-bottom"):
-                next_cursor = entry["content"]["value"]
-
-    return tweets, next_cursor
-
-
-def parse_home_timeline(data):
-
-    tweets = []
-    next_cursor = None
-
-    instructions = data["data"]["home"]["home_timeline_urt"]["instructions"]
-
-    for instruction in instructions:
-
-        if "entries" not in instruction:
-            continue
-
-        for entry in instruction["entries"]:
-
-            entry_id = entry["entryId"]
-
-            # tweet
-            if entry_id.startswith("tweet-"):
-                try:
-                    content = entry.get("content", {})
-
-                    tweet_data = (
-                        entry.get("content", {})
-                        .get("itemContent", {})
-                        .get("tweet_results", {})
-                        .get("result")
-                    )
-
-                    if tweet_data:
-                        tweets.append(build_tweet_object(tweet_data))
-
-                except Exception as e:
-                    print("Error parsing tweet entry:", e)
-                    continue
-
-            # Module with multiple tweets
-            if entry_id.startswith("home-conversation-"):
-                content = entry.get("content", {})
-
-                for item in content["items"]:
-                    try:
-                        tweet_data = (
-                            item.get("item", {})
-                            .get("itemContent", {})
-                            .get("tweet_results", {})
-                            .get("result")
-                        )
-
-                        if tweet_data:
-                            tweets.append(build_tweet_object(tweet_data))
-
-                    except Exception as e:
-                        print("Error parsing module tweet:", e)
-                        continue
-
-            # cursor
-            if entry_id.startswith("cursor-bottom"):
+            elif entry_id.startswith("cursor-bottom"):
                 next_cursor = entry["content"]["value"]
 
     return tweets, next_cursor
@@ -337,46 +256,24 @@ def build_tweet_object(tweet):
     user = tweet.get("core", {}).get("user_results", {}).get("result", {})
     user_legacy = user.get("legacy", {})
 
+    src = retweeted_status.get("legacy", {}) if retweeted_status else legacy
+
     return {
         "tweet_id": tweet.get("rest_id"),
         "created_at": legacy.get("created_at"),
-        "text": (
-            retweeted_status.get("legacy", {}).get("full_text")
-            if retweeted_status
-            else legacy.get("full_text")
-        ),
+        "text": src.get("full_text"),
         "language": legacy.get("lang"),
         "metrics": {
-            "likes": (
-                (retweeted_status.get("legacy", {}).get("favorite_count", 0))
-                if retweeted_status
-                else (legacy.get("favorite_count", 0))
-            ),
-            "retweets": (
-                (retweeted_status.get("legacy", {}).get("retweet_count", 0))
-                if retweeted_status
-                else (legacy.get("retweet_count", 0))
-            ),
-            "replies": (
-                (retweeted_status.get("legacy", {}).get("reply_count", 0))
-                if retweeted_status
-                else (legacy.get("reply_count", 0))
-            ),
-            "quotes": (
-                (retweeted_status.get("legacy", {}).get("quote_count", 0))
-                if retweeted_status
-                else (legacy.get("quote_count", 0))
-            ),
-            "bookmarks": (
-                (retweeted_status.get("legacy", {}).get("bookmark_count", 0))
-                if retweeted_status
-                else (legacy.get("bookmark_count", 0))
-            ),
+            "likes": src.get("favorite_count", 0),
+            "retweets": src.get("retweet_count", 0),
+            "replies": src.get("reply_count", 0),
+            "quotes": src.get("quote_count", 0),
+            "bookmarks": src.get("bookmark_count", 0),
         },
         "author": {
             "user_id": user.get("rest_id"),
-            "username": user.get("core", {}).get("screen_name"),
-            "display_name": user.get("core", {}).get("name"),
+            "username": user_legacy.get("screen_name"),
+            "display_name": user_legacy.get("name"),
             "followers": user_legacy.get("followers_count", 0),
         },
     }

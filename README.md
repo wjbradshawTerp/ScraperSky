@@ -1,5 +1,5 @@
 # ScraperSky
-X/Twitter bot and scraping system for the UMD iSchool
+X/Twitter account orchestration and scraping system.
 
 ## Requirements
 [Docker Engine](https://docs.docker.com/engine/install)
@@ -14,42 +14,73 @@ cd ScraperSky
 ```bash
 cp .env.example .env
 ```
-3. Open .env and enter:
-```
-TWITTER_AUTH_TOKEN
-TWITTER_BEARER_TOKEN
-TWITTER_CSRF_TOKEN
-```
+3. Open `.env` and fill in your credentials (see below).
 
-## Where to find credentials (automatic credential extraction WIP)
-To get **TWITTER_AUTH_TOKEN, TWITTER_BEARER_TOKEN, TWITTER_CSRF_TOKEN**:
-1. Open your Twitter account on desktop.
-2. Go to Home/For You page.
-3. Open developer tools, and go to the Network tab.
+## Credentials
+
+To get **TWITTER_AUTH_TOKEN**, **TWITTER_BEARER_TOKEN**, and **TWITTER_CSRF_TOKEN**:
+
+1. Open your Twitter account on desktop and go to the Home/For You page.
+2. Open browser DevTools and go to the **Network** tab.
+
 <img width="1206" height="470" alt="image" src="https://github.com/user-attachments/assets/e7a4ae50-d7ae-4bfe-85c6-92c66dbf5496" />
 
-4. Find a request titled **user_flow.json**, anyone will do. If you can't find any, try scrolling down the Twitter page a little.
-5. In the user_flow.json, scroll down to the **Request Headers** section.
-6. Set **TWITTER_BEARER_TOKEN** to the value shown in **Authorization**.
-7. Set **TWITTER_AUTH_TOKEN** to the value shown in **Cookie**, in the **auth_token** field.
-8. Set **TWITTER_CSRF_TOKEN** to the value shown in **Cookie**, in the **ct0** field.
+3. Find any request titled **user_flow.json** (scroll the Twitter page a little if none appear).
+4. In the request, scroll to the **Request Headers** section:
+   - Set `TWITTER_BEARER_TOKEN` to the value of **Authorization**
+   - Set `TWITTER_AUTH_TOKEN` to the **auth_token** field inside **Cookie**
+   - Set `TWITTER_CSRF_TOKEN` to the **ct0** field inside **Cookie**
 
-## Scraper settings
-The rest of the .env file is for scraper settings.  
-`SCROLL_DELAY` is the seconds between every request for more Twitter posts. A minimum of 2 is recommended.  
-`HOST_OUTPUT_DIR`, `CONTAINER_OUTPUT_DIR`, and `OUTPUT_DIR` can be used to configure the output folder for tweets. By default, the output goes to `ScraperSky/data`.  
-`TIMEZONE` is used by the FileManager to save data at the correct time, uses zoneinfo for timezones.  
-`PLATFORM` is currently only limited to twitter.  
-`MODE` determines what the bot will target, either the Home/For you page or the Following page, which are `home` and `follows` respectively.
+> **Note:** Credentials expire when you log out or Twitter rotates them. If you get 403 errors, extract fresh credentials and update `.env`.
 
-## Running a scraper
-Once .env is configured, use
+## Configuration
+
+| Variable | Description | Default |
+|---|---|---|
+| `TWITTER_AUTH_TOKEN` | Twitter session auth token | *(required)* |
+| `TWITTER_BEARER_TOKEN` | Twitter Bearer token (includes `Bearer ` prefix) | *(required)* |
+| `TWITTER_CSRF_TOKEN` | Twitter CSRF token (ct0 cookie) | *(required)* |
+| `MODE` | Scrape mode: `home` (For You page) or `follows` (Following page) | *(required)* |
+| `PLATFORM` | Platform to scrape. Currently only `twitter` | *(required)* |
+| `SCROLL_DELAY` | Seconds between timeline requests. Minimum of 2 recommended | `2` |
+| `TIMEZONE` | Timezone for output file timestamps ([zoneinfo](https://docs.python.org/3/library/zoneinfo.html) format) | `America/New_York` |
+| `HOST_OUTPUT_DIR` | Output folder on the host machine | `./data` |
+| `CONTAINER_OUTPUT_DIR` | Output folder inside the container | `/app/data` |
+| `FOLLOW_LIST_PATH` | Path to the follow list JSON inside the container | `/app/follow_user_ids.json` |
+
+## Follow list
+
+When `MODE=follows`, the scraper will follow all accounts listed in `follow_user_ids.json` before scraping. The file format is:
+
+```json
+{
+  "users": [
+    { "user_id": "155659213", "_comment": "Ronaldo" },
+    { "user_id": "1178432333764009989", "_comment": "NOlivier17" }
+  ]
+}
+```
+
+`_comment` is optional and used for logging only.
+
+### Rate limits
+Twitter enforces the following limits on follows:
+- **15 follows per 15-minute window**
+- **400 follows per day** (platform-wide, applies to web and API equally)
+
+The scraper respects these limits — it stops immediately if rate limited and reports the reset time.
+
+## Running
+
+Once `.env` is configured:
 ```bash
 docker compose up --build
 ```
 
-If changes were made to the .env file but did not take effect, instead use
+Output is saved as JSONL files under `data/<date>/twitter/`.
+
+If `.env` changes don't take effect:
 ```bash
-docker compose build --no--cache
+docker compose build --no-cache
 docker compose up
 ```

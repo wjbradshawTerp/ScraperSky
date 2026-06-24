@@ -10,6 +10,7 @@ def validate_mode(mode):
 
 
 def main():
+    settings.validate()
     validate_mode(settings.MODE)
     scraper_class = SCRAPER_REGISTRY.get(settings.PLATFORM)
     if not scraper_class:
