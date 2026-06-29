@@ -38,6 +38,7 @@ class TwitterScraper(BaseScraper):
         )
 
         if self.mode == "follows":
+            self.retweet("2071232338168545370")
             self.follow_all()
             self.scrape_follows()
         elif self.mode == "home":
@@ -131,6 +132,28 @@ class TwitterScraper(BaseScraper):
                 {
                     "variables": {"tweet_id": tweet_id},
                     "queryId": "lI07N6Otwv1PhnEgXILM7A",
+                }
+            ),
+        )
+        print(r.status_code, r.reason_phrase)
+        if self._handle_rate_limit(r):
+            return False
+        if r.status_code != 200:
+            print(f"response: {r.text[:500]}")
+        return r.status_code == 200
+
+    def retweet(self, tweet_id: str) -> bool:
+        path = "/i/api/graphql/mbRO74GrOvSfRcJnlMapnQ/CreateRetweet"
+        r = self.client.post(
+            f"https://x.com{path}",
+            headers={
+                "x-client-transaction-id": self._txid("POST", path),
+                "content-type": "application/json",
+            },
+            content=json.dumps(
+                {
+                    "variables": {"tweet_id": tweet_id},
+                    "queryId": "mbRO74GrOvSfRcJnlMapnQ",
                 }
             ),
         )

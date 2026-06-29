@@ -182,7 +182,7 @@ class XClientTransaction:
 def fetch_and_init() -> XClientTransaction:
     """Fetch x.com and the ondemand JS, then initialise an XClientTransaction."""
     with httpx.Client(follow_redirects=True, timeout=15) as client:
-        r = client.get("https://x.com", headers=BROWSER_HEADERS)
+        r = client.get("https://x.com/home", headers=BROWSER_HEADERS)
         html = r.text
 
         chunk_id = re.search(r'(\d+):"ondemand\.s"', html).group(1)
