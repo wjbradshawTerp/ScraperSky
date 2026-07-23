@@ -43,6 +43,8 @@ To get **TWITTER_AUTH_TOKEN**, **TWITTER_BEARER_TOKEN**, and **TWITTER_CSRF_TOKE
 | `MODE` | Scrape mode: `home` (For You page) or `follows` (Following page) | *(required)* |
 | `PLATFORM` | Platform to scrape. Currently only `twitter` | *(required)* |
 | `SCROLL_DELAY` | Seconds between timeline requests. Minimum of 2 recommended | `2` |
+| `FETCH_MAX_RETRIES` | Retries for a single cursor before giving up and restarting the timeline from the top | `5` |
+| `FETCH_RETRY_BACKOFF` | Base seconds for retry backoff (multiplied by attempt number) | `5` |
 | `TIMEZONE` | Timezone for output file timestamps ([zoneinfo](https://docs.python.org/3/library/zoneinfo.html) format) | `America/New_York` |
 | `HOST_OUTPUT_DIR` | Output folder on the host machine | `./data` |
 | `CONTAINER_OUTPUT_DIR` | Output folder inside the container | `/app/data` |
@@ -69,6 +71,13 @@ Twitter enforces the following limits on follows:
 - **400 follows per day** (platform-wide, applies to web and API equally)
 
 The scraper respects these limits — it stops immediately if rate limited and reports the reset time.
+
+## Continuous scraping
+
+The timeline scraper is designed to run indefinitely rather than stop when it reaches the end of what Twitter's pagination will offer:
+
+- **Bad responses are retried, not fatal.** Non-JSON responses, rate limits (`429`), and malformed/empty response bodies no longer crash the process. The scraper retries the same cursor with backoff (`FETCH_RETRY_BACKOFF` seconds × attempt number, up to `FETCH_MAX_RETRIES` times).
+- **Exhausted pagination restarts from the top.** When the bottom cursor stops advancing (a genuine end of the available timeline, typically tens of thousands of tweets in) or a cursor keeps failing after all retries, the scraper logs it and restarts pagination from the top of the timeline instead of exiting — so it keeps collecting new tweets as they arrive rather than terminating.
 
 ## Running
 

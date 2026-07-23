@@ -11,6 +11,10 @@ TWITTER_HOME_LATEST_TIMELINE_HASH = "KLMY6cZZUfQrLubs5DHHtQ"
 TWITTER_HOME_TIMELINE_HASH = "L8Lb9oomccM012S7fQ-QKA"
 
 
+class FetchFailedError(Exception):
+    """Raised when a timeline fetch doesn't return usable JSON (bad body, rate limit, etc.)."""
+
+
 class TwitterScraper(BaseScraper):
     def run(self):
         print("Running Twitter Scraper with the following parameters:")
@@ -59,16 +63,54 @@ class TwitterScraper(BaseScraper):
         num_tweets = 0
 
         while True:
-            data = fetch_fn(cursor)
-            time.sleep(settings.SCROLL_DELAY)
-            tweets, next_cursor = parse_timeline(data)
+            result = self._fetch_and_parse_with_retry(fetch_fn, cursor)
+
+            if result is None:
+                print(
+                    "Giving up on this cursor after repeated failures; "
+                    "restarting timeline from the top."
+                )
+                cursor = None
+                continue
+
+            tweets, next_cursor = result
             num_tweets += len(tweets)
             print(f"{num_tweets} tweets collected")
             self.file_manager.save_data(tweets)
 
             if not next_cursor or next_cursor == cursor:
-                break
+                print(
+                    "Bottom of pagination reached (no new cursor); "
+                    "restarting timeline from the top to keep running indefinitely."
+                )
+                cursor = None
+                continue
+
             cursor = next_cursor
+
+    def _fetch_and_parse_with_retry(self, fetch_fn, cursor):
+        """Fetches and parses the given cursor, retrying the SAME cursor with
+        backoff on bad/rate-limited/malformed responses.
+
+        A malformed response (e.g. an empty `{"data": {"home": {}}}` body) is
+        transient noise, not a signal that pagination has genuinely ended, so
+        it must not be treated the same as a real "no next cursor" result.
+
+        Returns (tweets, next_cursor), or None if all retries are exhausted.
+        """
+        for attempt in range(1, settings.FETCH_MAX_RETRIES + 1):
+            try:
+                data = fetch_fn(cursor)
+                time.sleep(settings.SCROLL_DELAY)
+                return parse_timeline(data)
+            except FetchFailedError as e:
+                wait = settings.FETCH_RETRY_BACKOFF * attempt
+                print(
+                    f"Fetch failed (attempt {attempt}/{settings.FETCH_MAX_RETRIES}): "
+                    f"{e}. Retrying same cursor in {wait}s..."
+                )
+                time.sleep(wait)
+        return None
 
     def _fetch_timeline(self, url, cursor):
         variables = {
@@ -87,12 +129,21 @@ class TwitterScraper(BaseScraper):
 
         r = self.client.get(url, params=params)
 
+        if self._handle_rate_limit(r):
+            reset = r.headers.get("x-rate-limit-reset")
+            if reset:
+                wait = max(int(reset) - int(time.time()), 1)
+                print(f"Sleeping {wait}s until rate limit resets...")
+                time.sleep(wait)
+            raise FetchFailedError(f"rate limited (status={r.status_code})")
+
         try:
             return r.json()
         except Exception:
             print("NON JSON RESPONSE:")
+            print(f"status={r.status_code}")
             print(r.text[:500])
-            raise
+            raise FetchFailedError(f"non-JSON response (status={r.status_code})")
 
     def fetch_follow_latest(self, cursor=None):
         url = f"https://x.com/i/api/graphql/{TWITTER_HOME_LATEST_TIMELINE_HASH}/HomeLatestTimeline"
@@ -220,18 +271,21 @@ class TwitterScraper(BaseScraper):
 
 def parse_timeline(data):
     tweets = []
-    next_cursor = None
 
     if "errors" in data:
-        for err in data["errors"]:
-            print(f"API error {err.get('code')}: {err.get('message')}")
-        return tweets, next_cursor
+        codes = ", ".join(
+            f"{err.get('code')}: {err.get('message')}" for err in data["errors"]
+        )
+        raise FetchFailedError(f"API returned errors: {codes}")
 
     try:
         instructions = data["data"]["home"]["home_timeline_urt"]["instructions"]
     except KeyError:
-        print(f"Unexpected response structure: {json.dumps(data)[:300]}")
-        return tweets, next_cursor
+        raise FetchFailedError(
+            f"Unexpected response structure: {json.dumps(data)[:300]}"
+        )
+
+    next_cursor = None
 
     for instruction in instructions:
         if "entries" not in instruction:
@@ -242,7 +296,7 @@ def parse_timeline(data):
 
             if entry_id.startswith("tweet-"):
                 try:
-                    tweet_data = (
+                    tweet_data = _unwrap_tweet_result(
                         entry.get("content", {})
                         .get("itemContent", {})
                         .get("tweet_results", {})
@@ -256,7 +310,7 @@ def parse_timeline(data):
             elif entry_id.startswith("home-conversation-"):
                 for item in entry.get("content", {}).get("items", []):
                     try:
-                        tweet_data = (
+                        tweet_data = _unwrap_tweet_result(
                             item.get("item", {})
                             .get("itemContent", {})
                             .get("tweet_results", {})
@@ -271,6 +325,28 @@ def parse_timeline(data):
                 next_cursor = entry["content"]["value"]
 
     return tweets, next_cursor
+
+
+def _unwrap_tweet_result(result):
+    """Normalizes a tweet_results.result node to a plain Tweet dict (or None).
+
+    `result` isn't always a `Tweet` — sensitive/age-restricted tweets come
+    back as `TweetWithVisibilityResults` with the real tweet nested under
+    `result["tweet"]`, and deleted/suspended/withheld tweets come back as
+    `TweetTombstone` with no underlying tweet data at all.
+    """
+    if not result:
+        return None
+
+    typename = result.get("__typename")
+
+    if typename == "TweetWithVisibilityResults":
+        return result.get("tweet")
+
+    if typename == "TweetTombstone" or "rest_id" not in result:
+        return None
+
+    return result
 
 
 def build_tweet_object(tweet):

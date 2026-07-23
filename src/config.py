@@ -9,6 +9,8 @@ class Settings:
     TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
     TWITTER_CSRF_TOKEN = os.getenv("TWITTER_CSRF_TOKEN")
     SCROLL_DELAY = float(os.getenv("SCROLL_DELAY", 2))
+    FETCH_MAX_RETRIES = int(os.getenv("FETCH_MAX_RETRIES", 5))
+    FETCH_RETRY_BACKOFF = float(os.getenv("FETCH_RETRY_BACKOFF", 5))
     OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/app/data")
     TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
     PLATFORM = os.getenv("PLATFORM")
