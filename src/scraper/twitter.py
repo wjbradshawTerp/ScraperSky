@@ -2,13 +2,63 @@ import datetime
 import httpx
 import time
 import json
+from collections import OrderedDict
 from scraper.base import BaseScraper
 from scraper.x_client import fetch_and_init
 from config import settings
 from storage.file_manager import FileManager
 
 TWITTER_HOME_LATEST_TIMELINE_HASH = "KLMY6cZZUfQrLubs5DHHtQ"
-TWITTER_HOME_TIMELINE_HASH = "L8Lb9oomccM012S7fQ-QKA"
+TWITTER_HOME_TIMELINE_HASH = "3b9_7tltt0hJRef-xm_3sw"
+
+# Feature flags copied verbatim from a real browser HomeTimeline request.
+# X rotates these (and the hash above) periodically, the same way the
+# x-client-transaction-id generator in x_client.py needs occasional care --
+# if collection degrades again, re-capture a fresh HomeTimeline request from
+# the browser devtools and diff it against this constant.
+TWITTER_HOME_TIMELINE_FEATURES = {
+    "rweb_video_screen_enabled": False,
+    "rweb_cashtags_enabled": True,
+    "profile_label_improvements_pcf_label_in_post_enabled": True,
+    "responsive_web_profile_redirect_enabled": True,
+    "rweb_tipjar_consumption_enabled": False,
+    "verified_phone_label_enabled": False,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+    "premium_content_api_read_enabled": False,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "c9s_tweet_anatomy_moderator_badge_enabled": True,
+    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+    "responsive_web_grok_analyze_post_followups_enabled": True,
+    "rweb_cashtags_composer_attachment_enabled": True,
+    "responsive_web_jetfuel_frame": True,
+    "responsive_web_grok_share_attachment_enabled": True,
+    "responsive_web_grok_annotations_enabled": True,
+    "articles_preview_enabled": True,
+    "responsive_web_edit_tweet_api_enabled": True,
+    "rweb_conversational_replies_downvote_enabled": False,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+    "view_counts_everywhere_api_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "content_disclosure_indicator_enabled": True,
+    "content_disclosure_ai_generated_indicator_enabled": True,
+    "responsive_web_grok_show_grok_translated_post": True,
+    "responsive_web_grok_analysis_button_from_backend": True,
+    "post_ctas_fetch_enabled": False,
+    "freedom_of_speech_not_reach_fetch_enabled": True,
+    "standardized_nudges_misinfo": True,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+    "longform_notetweets_rich_text_read_enabled": True,
+    "longform_notetweets_inline_media_enabled": False,
+    "responsive_web_grok_image_annotation_enabled": True,
+    "responsive_web_grok_imagine_annotation_enabled": True,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": True,
+    "responsive_web_enhance_cards_enabled": False,
+}
+
+# Local output-integrity safety net for scrape_home only; not sent over the wire.
+_DEDUP_CACHE_SIZE = 5000
 
 
 class FetchFailedError(Exception):
@@ -50,7 +100,9 @@ class TwitterScraper(BaseScraper):
 
     def scrape_home(self):
         print("Scraping Twitter home timeline.")
-        self._scrape_timeline(self.fetch_home_latest, TWITTER_HOME_TIMELINE_HASH)
+        self._scrape_timeline(
+            self.fetch_home_latest, TWITTER_HOME_TIMELINE_HASH, track_seen_ids=True
+        )
 
     def scrape_follows(self):
         print("Scraping Twitter for all tweets from followed accounts.")
@@ -58,9 +110,21 @@ class TwitterScraper(BaseScraper):
             self.fetch_follow_latest, TWITTER_HOME_LATEST_TIMELINE_HASH
         )
 
-    def _scrape_timeline(self, fetch_fn, _hash):
+    def _scrape_timeline(self, fetch_fn, _hash, track_seen_ids=False):
         cursor = None
         num_tweets = 0
+
+        if track_seen_ids:
+            # Rolling: IDs from the page we just fetched, echoed back to
+            # Twitter as `seenTweetIds` on the next request (see
+            # _fetch_timeline) so the ranking backend doesn't re-serve them
+            # instead of pulling fresh candidates. This mirrors what a real
+            # browser session does -- it is NOT a growing full-run history.
+            self.seen_tweet_ids = []
+            # Separate, capped local cache of every tweet_id collected this
+            # run, used only to keep exact duplicates out of the JSONL
+            # output; never sent over the wire.
+            self._collected_tweet_ids = OrderedDict()
 
         while True:
             result = self._fetch_and_parse_with_retry(fetch_fn, cursor)
@@ -74,9 +138,32 @@ class TwitterScraper(BaseScraper):
                 continue
 
             tweets, next_cursor = result
+
+            if track_seen_ids:
+                new_tweets = []
+                for tweet in tweets:
+                    tweet_id = tweet.get("tweet_id")
+                    if tweet_id and tweet_id in self._collected_tweet_ids:
+                        continue
+                    new_tweets.append(tweet)
+                    if tweet_id:
+                        self._collected_tweet_ids[tweet_id] = True
+                        if len(self._collected_tweet_ids) > _DEDUP_CACHE_SIZE:
+                            self._collected_tweet_ids.popitem(last=False)
+
+                skipped = len(tweets) - len(new_tweets)
+                if skipped:
+                    print(f"Filtered {skipped} duplicate tweet(s) already collected this run.")
+
+                self.seen_tweet_ids = [
+                    tweet.get("tweet_id") for tweet in tweets if tweet.get("tweet_id")
+                ]
+                tweets = new_tweets
+
             num_tweets += len(tweets)
             print(f"{num_tweets} tweets collected")
-            self.file_manager.save_data(tweets)
+            if tweets:
+                self.file_manager.save_data(tweets)
 
             if not next_cursor or next_cursor == cursor:
                 print(
@@ -112,19 +199,18 @@ class TwitterScraper(BaseScraper):
                 time.sleep(wait)
         return None
 
-    def _fetch_timeline(self, url, cursor):
-        variables = {
-            "count": 20,
-            "includePromotedContent": True,
-            "latestControlAvailable": True,
-            "withVoice": True,
-        }
+    def _fetch_timeline(self, url, cursor, variables, features):
+        variables = dict(variables)
         if cursor:
             variables["cursor"] = cursor
 
+        seen_ids = getattr(self, "seen_tweet_ids", None)
+        if seen_ids:
+            variables["seenTweetIds"] = seen_ids
+
         params = {
             "variables": json.dumps(variables),
-            "features": json.dumps({}),
+            "features": json.dumps(features),
         }
 
         r = self.client.get(url, params=params)
@@ -147,11 +233,24 @@ class TwitterScraper(BaseScraper):
 
     def fetch_follow_latest(self, cursor=None):
         url = f"https://x.com/i/api/graphql/{TWITTER_HOME_LATEST_TIMELINE_HASH}/HomeLatestTimeline"
-        return self._fetch_timeline(url, cursor)
+        variables = {
+            "count": 20,
+            "includePromotedContent": True,
+            "latestControlAvailable": True,
+            "withVoice": True,
+        }
+        return self._fetch_timeline(url, cursor, variables, {})
 
     def fetch_home_latest(self, cursor=None):
         url = f"https://x.com/i/api/graphql/{TWITTER_HOME_TIMELINE_HASH}/HomeTimeline"
-        return self._fetch_timeline(url, cursor)
+        variables = {
+            "count": 20,
+            "includePromotedContent": True,
+            "withCommunity": True,
+        }
+        if cursor is None:
+            variables["requestContext"] = "launch"
+        return self._fetch_timeline(url, cursor, variables, TWITTER_HOME_TIMELINE_FEATURES)
 
     def _txid(self, method: str, path: str) -> str:
         return self.ct.generate(method, path)
