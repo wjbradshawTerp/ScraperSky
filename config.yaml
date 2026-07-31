@@ -1,0 +1,44 @@
+# Behavioral/experiment configuration for ScraperSky.
+#
+# Anything in this file is non-secret and safe to share/commit. Credentials
+# (TWITTER_AUTH_TOKEN, TWITTER_BEARER_TOKEN, TWITTER_CSRF_TOKEN) and
+# machine-specific Docker volume paths (HOST_OUTPUT_DIR, CONTAINER_OUTPUT_DIR,
+# OUTPUT_DIR) stay in .env instead -- see .env.example.
+
+# Which scraper/platform implementation to run. Currently only "twitter" is
+# implemented (see src/scraper/__init__.py's SCRAPER_REGISTRY).
+platform: twitter
+
+# Which mode to run:
+#   home    - algorithmic "For You" timeline
+#   follows - chronological Following timeline; also runs follow_all()
+#             first, to follow every account in the "follow_list" below
+mode: follows
+
+# Seconds to wait between timeline fetch requests. 2s minimum recommended
+# to stay comfortably under Twitter's rate limits.
+scroll_delay: 2
+
+# Retry behavior for a single pagination cursor before giving up on it and
+# restarting the timeline from the top (see _fetch_and_parse_with_retry in
+# src/scraper/twitter.py). fetch_retry_backoff is in seconds and is
+# multiplied by the attempt number (1st retry waits Nx1s, 2nd waits Nx2s...).
+fetch_max_retries: 5
+fetch_retry_backoff: 5
+
+# Timezone used for timestamping output files/records (IANA zoneinfo key,
+# e.g. "America/New_York", "UTC").
+timezone: America/New_York
+
+# account_lists: named collections of accounts, referenced by name from
+# code (e.g. follow_all() reads "follow_list"). Each value is a path to a
+# JSON file shaped like follow_user_ids.json:
+#   {"users": [{"user_id": "...", "_comment": "..."}]}
+# Relative paths are resolved against this file's own directory.
+#
+# Add more named lists here as the experiment framework grows (e.g.
+# untrustworthy_sources, prominent_news_sources for the Mercury Project
+# case study) — nothing else needs to change until code actually consumes
+# a given name.
+account_lists:
+  follow_list: follow_user_ids.json

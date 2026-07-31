@@ -1,5 +1,6 @@
 import datetime
 import httpx
+import os
 import time
 import json
 from collections import OrderedDict
@@ -7,6 +8,7 @@ from scraper.base import BaseScraper
 from scraper.x_client import fetch_and_init
 from config import settings
 from storage.file_manager import FileManager
+from storage.agent_state import AgentState
 
 TWITTER_HOME_LATEST_TIMELINE_HASH = "KLMY6cZZUfQrLubs5DHHtQ"
 TWITTER_HOME_TIMELINE_HASH = "3b9_7tltt0hJRef-xm_3sw"
@@ -71,6 +73,9 @@ class TwitterScraper(BaseScraper):
         print("Mode:", self.mode)
 
         self.file_manager = FileManager(settings.OUTPUT_DIR, "twitter", self.mode)
+        self.agent_state = AgentState(
+            os.path.join(settings.OUTPUT_DIR, "state", "twitter_agent_state.json")
+        )
 
         print("Initialising x-client-transaction-id generator...")
         self.ct = fetch_and_init()
@@ -92,7 +97,6 @@ class TwitterScraper(BaseScraper):
         )
 
         if self.mode == "follows":
-            self.retweet("2071232338168545370")
             self.follow_all()
             self.scrape_follows()
         elif self.mode == "home":
@@ -357,14 +361,19 @@ class TwitterScraper(BaseScraper):
         return True
 
     def follow_all(self):
-        with open(settings.FOLLOW_LIST_PATH, "r", encoding="utf-8") as f:
+        list_path = settings.get_account_list_path("follow_list")
+        with open(list_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         for entry in data["users"]:
             user_id = entry["user_id"]
+            if self.agent_state.is_following(user_id):
+                print(f"Already following {user_id} ({entry.get('_comment', '')}); skipping.")
+                continue
             print(f"Following user {user_id} ({entry.get('_comment', '')})...")
             if not self.follow_user(user_id):
                 break
+            self.agent_state.mark_followed(user_id)
             time.sleep(5)
 
 
@@ -452,7 +461,11 @@ def build_tweet_object(tweet):
     legacy = tweet.get("legacy", {})
     retweeted_status = legacy.get("retweeted_status_result", {}).get("result")
     user = tweet.get("core", {}).get("user_results", {}).get("result", {})
+    # X has moved some UserResults fields (name/screen_name) out of `legacy`
+    # and into `core` over time, without a clean cutover -- check both so
+    # this keeps working regardless of which shape a given response uses.
     user_legacy = user.get("legacy", {})
+    user_core = user.get("core", {})
 
     src = retweeted_status.get("legacy", {}) if retweeted_status else legacy
 
@@ -470,8 +483,9 @@ def build_tweet_object(tweet):
         },
         "author": {
             "user_id": user.get("rest_id"),
-            "username": user_legacy.get("screen_name"),
-            "display_name": user_legacy.get("name"),
-            "followers": user_legacy.get("followers_count", 0),
+            "username": user_core.get("screen_name") or user_legacy.get("screen_name"),
+            "display_name": user_core.get("name") or user_legacy.get("name"),
+            "followers": user_legacy.get("followers_count")
+            or user.get("relationship_counts", {}).get("followers", 0),
         },
     }

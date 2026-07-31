@@ -15,6 +15,7 @@ cd ScraperSky
 cp .env.example .env
 ```
 3. Open `.env` and fill in your credentials (see below).
+4. Review `config.yaml` and adjust `mode`/`platform`/etc. as needed (defaults work out of the box).
 
 ## Credentials
 
@@ -35,24 +36,50 @@ To get **TWITTER_AUTH_TOKEN**, **TWITTER_BEARER_TOKEN**, and **TWITTER_CSRF_TOKE
 
 ## Configuration
 
+Settings are split across two files:
+- **`.env`** — secrets, plus Docker volume paths (machine/deployment-specific, not experiment behavior).
+- **`config.yaml`** — everything about how the scraper behaves. Non-secret and safe to share/commit.
+
+### `.env`
+
 | Variable | Description | Default |
 |---|---|---|
 | `TWITTER_AUTH_TOKEN` | Twitter session auth token | *(required)* |
 | `TWITTER_BEARER_TOKEN` | Twitter Bearer token (includes `Bearer ` prefix) | *(required)* |
 | `TWITTER_CSRF_TOKEN` | Twitter CSRF token (ct0 cookie) | *(required)* |
-| `MODE` | Scrape mode: `home` (For You page) or `follows` (Following page) | *(required)* |
-| `PLATFORM` | Platform to scrape. Currently only `twitter` | *(required)* |
-| `SCROLL_DELAY` | Seconds between timeline requests. Minimum of 2 recommended | `2` |
-| `FETCH_MAX_RETRIES` | Retries for a single cursor before giving up and restarting the timeline from the top | `5` |
-| `FETCH_RETRY_BACKOFF` | Base seconds for retry backoff (multiplied by attempt number) | `5` |
-| `TIMEZONE` | Timezone for output file timestamps ([zoneinfo](https://docs.python.org/3/library/zoneinfo.html) format) | `America/New_York` |
 | `HOST_OUTPUT_DIR` | Output folder on the host machine | `./data` |
 | `CONTAINER_OUTPUT_DIR` | Output folder inside the container | `/app/data` |
-| `FOLLOW_LIST_PATH` | Path to the follow list JSON inside the container | `/app/follow_user_ids.json` |
+| `OUTPUT_DIR` | Output folder as seen by the app itself (matches `CONTAINER_OUTPUT_DIR` when run via Docker) | `/app/data` |
+| `CONFIG_PATH` | Path to `config.yaml` (see below) | `config.yaml` |
+
+### `config.yaml`
+
+| Key | Description | Default |
+|---|---|---|
+| `mode` | Scrape mode: `home` (For You page) or `follows` (Following page) | *(required)* |
+| `platform` | Platform to scrape. Currently only `twitter` | *(required)* |
+| `scroll_delay` | Seconds between timeline requests. Minimum of 2 recommended | `2` |
+| `fetch_max_retries` | Retries for a single cursor before giving up and restarting the timeline from the top | `5` |
+| `fetch_retry_backoff` | Base seconds for retry backoff (multiplied by attempt number) | `5` |
+| `timezone` | Timezone for output file timestamps ([zoneinfo](https://docs.python.org/3/library/zoneinfo.html) format) | `America/New_York` |
+| `account_lists` | Named account lists (see below) | *(required — at least `follow_list`)* |
+
+```yaml
+mode: follows
+platform: twitter
+scroll_delay: 2
+fetch_max_retries: 5
+fetch_retry_backoff: 5
+timezone: America/New_York
+account_lists:
+  follow_list: follow_user_ids.json
+```
+
+`follow_all()` (run automatically when `mode: follows`) reads the `follow_list` entry. Add more named lists here as needed — nothing else changes until code reads a given name.
 
 ## Follow list
 
-When `MODE=follows`, the scraper will follow all accounts listed in `follow_user_ids.json` before scraping. The file format is:
+Each account list is a JSON file shaped like `follow_user_ids.json`:
 
 ```json
 {
@@ -63,7 +90,7 @@ When `MODE=follows`, the scraper will follow all accounts listed in `follow_user
 }
 ```
 
-`_comment` is optional and used for logging only.
+`_comment` is optional and used for logging only. The scraper tracks which accounts it has already followed (`data/state/twitter_agent_state.json`) and skips ones already followed on subsequent runs, so restarting the container doesn't re-send follow requests for accounts it followed in a previous run.
 
 ### Rate limits
 Twitter enforces the following limits on follows:
@@ -76,22 +103,22 @@ The scraper respects these limits — it stops immediately if rate limited and r
 
 The timeline scraper is designed to run indefinitely rather than stop when it reaches the end of what Twitter's pagination will offer:
 
-- **Bad responses are retried, not fatal.** Non-JSON responses, rate limits (`429`), and malformed/empty response bodies no longer crash the process. The scraper retries the same cursor with backoff (`FETCH_RETRY_BACKOFF` seconds × attempt number, up to `FETCH_MAX_RETRIES` times).
+- **Bad responses are retried, not fatal.** Non-JSON responses, rate limits (`429`), and malformed/empty response bodies no longer crash the process. The scraper retries the same cursor with backoff (`fetch_retry_backoff` seconds × attempt number, up to `fetch_max_retries` times).
 - **Exhausted pagination restarts from the top.** When the bottom cursor stops advancing or a cursor keeps failing after all retries, the scraper logs it and restarts pagination from the top of the timeline instead of exiting — so it keeps collecting new tweets as they arrive rather than terminating.
-- **Home ("For You") avoids re-collecting the same posts.** The "For You" ranking endpoint only has a finite pool of candidates at any moment, so naively restarting from the top would otherwise just re-serve the same batch. `MODE=home` mirrors what the real web app does to avoid this: it echoes the tweet IDs from the page it just received back to Twitter as `seenTweetIds` on the next request, telling the ranking backend not to re-serve them, and separately keeps a local cache of every tweet ID collected during the run so any duplicate that slips through anyway is filtered out before being written to the output file. `MODE=follows` (the chronological Following timeline) doesn't need this and is unaffected.
+- **Home ("For You") avoids re-collecting the same posts.** The "For You" ranking endpoint only has a finite pool of candidates at any moment, so naively restarting from the top would otherwise just re-serve the same batch. `mode: home` mirrors what the real web app does to avoid this: it echoes the tweet IDs from the page it just received back to Twitter as `seenTweetIds` on the next request, telling the ranking backend not to re-serve them, and separately keeps a local cache of every tweet ID collected during the run so any duplicate that slips through anyway is filtered out before being written to the output file. `mode: follows` (the chronological Following timeline) doesn't need this and is unaffected.
 
 > **Note:** Twitter periodically rotates the internal GraphQL query hash and feature flags the Home timeline endpoint expects (`TWITTER_HOME_TIMELINE_HASH` / `TWITTER_HOME_TIMELINE_FEATURES` in `src/scraper/twitter.py`). If `MODE=home` collection degrades or plateaus again, capture a fresh `HomeTimeline` request from the browser DevTools Network tab (same request used to pull `TWITTER_BEARER_TOKEN`/`TWITTER_CSRF_TOKEN` above) and update those constants to match.
 
 ## Running
 
-Once `.env` is configured:
+Once `.env` and `config.yaml` are configured:
 ```bash
 docker compose up --build
 ```
 
 Output is saved as JSONL files under `data/<date>/twitter/`.
 
-If `.env` changes don't take effect:
+`config.yaml` is bind-mounted into the container (see `docker-compose.yml`), so changes to it take effect on the next restart without rebuilding. If `.env` changes don't take effect:
 ```bash
 docker compose build --no-cache
 docker compose up
