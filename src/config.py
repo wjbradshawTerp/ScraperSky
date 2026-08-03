@@ -28,7 +28,10 @@ class Settings:
         self.FETCH_RETRY_BACKOFF = float(self._config.get("fetch_retry_backoff", 5))
         self.TIMEZONE = self._config.get("timezone", "America/New_York")
         self.PLATFORM = self._config.get("platform")
-        self.MODE = self._config.get("mode")
+        data_collection = self._config.get("data_collection") or {}
+        self.DATA_COLLECTION_TARGETS = data_collection.get("targets") or []
+        self.SEARCH_QUERY = data_collection.get("search_query")
+        self.ACTIONS = self._config.get("actions") or {}
 
     def _load_config(self):
         if not os.path.exists(self.CONFIG_PATH):
@@ -59,9 +62,11 @@ class Settings:
             if not getattr(self, name)
         ]
         missing_config = [
-            key for key, name in (("platform", "PLATFORM"), ("mode", "MODE"))
+            key for key, name in (("platform", "PLATFORM"),)
             if not getattr(self, name)
         ]
+        if not self.DATA_COLLECTION_TARGETS:
+            missing_config.append("data_collection.targets")
         problems = []
         if missing_env:
             problems.append(f"missing .env variable(s): {', '.join(missing_env)}")

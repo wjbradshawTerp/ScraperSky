@@ -9,11 +9,37 @@
 # implemented (see src/scraper/__init__.py's SCRAPER_REGISTRY).
 platform: twitter
 
-# Which mode to run:
-#   home    - algorithmic "For You" timeline
-#   follows - chronological Following timeline; also runs follow_all()
-#             first, to follow every account in the "follow_list" below
-mode: follows
+# data_collection.targets: which timeline(s) to observe this run. Each
+# entry maps to an observation method on the scraper (see
+# src/scraper/twitter.py):
+#   for_you_feed  - algorithmic "For You" timeline (fetch_for_you_feed)
+#   home_timeline - chronological Following timeline (fetch_home_timeline)
+#   search        - keyword search results (fetch_search_timeline);
+#                   requires search_query to be set below
+# Observation is decoupled from actions (see `actions` below) -- previously
+# a single "mode" controlled both what was scraped AND whether follow_all()
+# ran; now they're independent.
+#
+# NOTE: exactly one target is supported for now. The scraper is still a
+# single-threaded process that scrapes one timeline continuously; true
+# simultaneous multi-target polling arrives with the Agent Runtime's
+# decision cycle (roadmap Phase 4), which is why this is already
+# list-shaped even though only one entry is used today.
+data_collection:
+  targets:
+    - for_you_feed
+
+  # Query text for the "search" target above (X's "All of these words"
+  # search — plain keywords, no special query-operator handling yet).
+  # Only read when "search" is one of the targets.
+  search_query: trump
+
+# actions: non-LLM scripted actions to run once at startup, before
+# observation begins. This is a stand-in for the future LLM-driven action
+# loop (roadmap Phase 4) -- for now it's just "should follow_all() run this
+# session".
+actions:
+  follow_all: true
 
 # Seconds to wait between timeline fetch requests. 2s minimum recommended
 # to stay comfortably under Twitter's rate limits.

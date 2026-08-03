@@ -15,7 +15,7 @@ cd ScraperSky
 cp .env.example .env
 ```
 3. Open `.env` and fill in your credentials (see below).
-4. Review `config.yaml` and adjust `mode`/`platform`/etc. as needed (defaults work out of the box).
+4. Review `config.yaml` and adjust `data_collection.targets`/`platform`/etc. as needed (defaults work out of the box).
 
 ## Credentials
 
@@ -56,8 +56,10 @@ Settings are split across two files:
 
 | Key | Description | Default |
 |---|---|---|
-| `mode` | Scrape mode: `home` (For You page) or `follows` (Following page) | *(required)* |
 | `platform` | Platform to scrape. Currently only `twitter` | *(required)* |
+| `data_collection.targets` | Which timeline(s) to observe. One of `for_you_feed` (algorithmic "For You"), `home_timeline` (chronological Following), or `search` (keyword search) — exactly one entry for now (see below) | *(required)* |
+| `data_collection.search_query` | Query text for the `search` target ("All of these words" — plain keywords, no query operators yet). Required if `search` is a target | *(required if using `search`)* |
+| `actions.follow_all` | Whether to run `follow_all()` at startup, following every account in the `follow_list` account list | `false` |
 | `scroll_delay` | Seconds between timeline requests. Minimum of 2 recommended | `2` |
 | `fetch_max_retries` | Retries for a single cursor before giving up and restarting the timeline from the top | `5` |
 | `fetch_retry_backoff` | Base seconds for retry backoff (multiplied by attempt number) | `5` |
@@ -65,8 +67,13 @@ Settings are split across two files:
 | `account_lists` | Named account lists (see below) | *(required — at least `follow_list`)* |
 
 ```yaml
-mode: follows
 platform: twitter
+data_collection:
+  targets:
+    - home_timeline
+  search_query: trump   # only read when "search" is a target
+actions:
+  follow_all: true
 scroll_delay: 2
 fetch_max_retries: 5
 fetch_retry_backoff: 5
@@ -75,7 +82,13 @@ account_lists:
   follow_list: follow_user_ids.json
 ```
 
-`follow_all()` (run automatically when `mode: follows`) reads the `follow_list` entry. Add more named lists here as needed — nothing else changes until code reads a given name.
+Observation and actions are independent: `data_collection.targets` picks what gets scraped, `actions.follow_all` separately controls whether `follow_all()` runs at startup — you can follow without scraping, scrape without following, or both. `follow_all()` reads the `follow_list` account list; add more named lists as needed, nothing else changes until code reads a given name.
+
+Only one `data_collection.targets` entry is supported per run today — the scraper is still a single-threaded process that observes one timeline continuously. Simultaneous multi-target polling (observing `for_you_feed` and `home_timeline` together every cycle, as the eventual Agent Runtime needs) is planned but not yet built.
+
+Actions beyond `follow_all` (liking, retweeting, muting) are implemented (`favorite_tweet()`, `retweet()`, `mute_user()`, `follow_user()`) and reachable through a single dispatcher, `TwitterScraper.execute_action(action, target)`, but nothing calls it automatically yet outside of `follow_all()` — that wiring is the future LLM-driven decision loop's job.
+
+> **Known issue:** the `search` target is fully wired (query hash, variables, response parsing) but currently returns `404` against the live API. `x-client-transaction-id` and `content-type: application/json` have been added to GET requests as likely fixes; neither has confirmed it yet. `for_you_feed` and `home_timeline` are unaffected and working.
 
 ## Follow list
 
@@ -105,9 +118,9 @@ The timeline scraper is designed to run indefinitely rather than stop when it re
 
 - **Bad responses are retried, not fatal.** Non-JSON responses, rate limits (`429`), and malformed/empty response bodies no longer crash the process. The scraper retries the same cursor with backoff (`fetch_retry_backoff` seconds × attempt number, up to `fetch_max_retries` times).
 - **Exhausted pagination restarts from the top.** When the bottom cursor stops advancing or a cursor keeps failing after all retries, the scraper logs it and restarts pagination from the top of the timeline instead of exiting — so it keeps collecting new tweets as they arrive rather than terminating.
-- **Home ("For You") avoids re-collecting the same posts.** The "For You" ranking endpoint only has a finite pool of candidates at any moment, so naively restarting from the top would otherwise just re-serve the same batch. `mode: home` mirrors what the real web app does to avoid this: it echoes the tweet IDs from the page it just received back to Twitter as `seenTweetIds` on the next request, telling the ranking backend not to re-serve them, and separately keeps a local cache of every tweet ID collected during the run so any duplicate that slips through anyway is filtered out before being written to the output file. `mode: follows` (the chronological Following timeline) doesn't need this and is unaffected.
+- **`for_you_feed` and `search` avoid re-collecting the same posts.** Both endpoints rank against a finite pool of candidates at any moment, so naively restarting from the top would otherwise just re-serve the same batch. `fetch_for_you_feed()` and `fetch_search_timeline()` mirror what the real web app does to avoid this: they echo the tweet IDs from the page just received back to Twitter as `seenTweetIds` on the next request, telling the ranking backend not to re-serve them, and separately keep a local cache of every tweet ID collected during the run so any duplicate that slips through anyway is filtered out before being written to the output file. `home_timeline` (the chronological Following timeline) doesn't need this and is unaffected.
 
-> **Note:** Twitter periodically rotates the internal GraphQL query hash and feature flags the Home timeline endpoint expects (`TWITTER_HOME_TIMELINE_HASH` / `TWITTER_HOME_TIMELINE_FEATURES` in `src/scraper/twitter.py`). If `MODE=home` collection degrades or plateaus again, capture a fresh `HomeTimeline` request from the browser DevTools Network tab (same request used to pull `TWITTER_BEARER_TOKEN`/`TWITTER_CSRF_TOKEN` above) and update those constants to match.
+> **Note:** Twitter periodically rotates the internal GraphQL query hash and feature flags each timeline endpoint expects (`TWITTER_HOME_TIMELINE_HASH`/`TWITTER_HOME_TIMELINE_FEATURES`, `TWITTER_SEARCH_TIMELINE_HASH`/`TWITTER_SEARCH_TIMELINE_FEATURES` in `src/scraper/twitter.py`). If collection degrades or plateaus, capture a fresh request for that endpoint from the browser DevTools Network tab (same request used to pull `TWITTER_BEARER_TOKEN`/`TWITTER_CSRF_TOKEN` above) and update the matching constants.
 
 ## Running
 

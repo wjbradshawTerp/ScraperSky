@@ -12,6 +12,12 @@ from storage.agent_state import AgentState
 
 TWITTER_HOME_LATEST_TIMELINE_HASH = "KLMY6cZZUfQrLubs5DHHtQ"
 TWITTER_HOME_TIMELINE_HASH = "3b9_7tltt0hJRef-xm_3sw"
+TWITTER_SEARCH_TIMELINE_HASH = "BGd0T_j7oVwlW5U79tO_0A"
+
+# Response paths (under data[...]) each endpoint nests its `instructions`
+# list under -- see parse_timeline().
+HOME_TIMELINE_PATH = ("home", "home_timeline_urt")
+SEARCH_TIMELINE_PATH = ("search_by_raw_query", "search_timeline", "timeline")
 
 # Feature flags copied verbatim from a real browser HomeTimeline request.
 # X rotates these (and the hash above) periodically, the same way the
@@ -59,7 +65,15 @@ TWITTER_HOME_TIMELINE_FEATURES = {
     "responsive_web_enhance_cards_enabled": False,
 }
 
-# Local output-integrity safety net for scrape_home only; not sent over the wire.
+# SearchTimeline happens to request the identical feature-flag set as
+# HomeTimeline as of this writing (captured from a real browser request) --
+# kept as its own name rather than reusing TWITTER_HOME_TIMELINE_FEATURES
+# directly so the two can drift independently if X changes one but not the
+# other.
+TWITTER_SEARCH_TIMELINE_FEATURES = dict(TWITTER_HOME_TIMELINE_FEATURES)
+
+# Local output-integrity safety net for observation methods that track seen
+# ids (fetch_for_you_feed, fetch_search_timeline); not sent over the wire.
 _DEDUP_CACHE_SIZE = 5000
 
 
@@ -68,11 +82,31 @@ class FetchFailedError(Exception):
 
 
 class TwitterScraper(BaseScraper):
+    # Maps a generic action name (as used by execute_action, and eventually
+    # by the LLM Agent Runtime's decision output) to the concrete method
+    # that performs it.
+    ACTION_HANDLERS = {
+        "like": "favorite_tweet",
+        "retweet": "retweet",
+        "follow": "follow_user",
+        "mute": "mute_user",
+    }
+
+    # Maps a data_collection target name to the observation method that
+    # serves it.
+    OBSERVATION_HANDLERS = {
+        "for_you_feed": "fetch_for_you_feed",
+        "home_timeline": "fetch_home_timeline",
+        "search": "fetch_search_timeline",
+    }
+
     def run(self):
         print("Running Twitter Scraper with the following parameters:")
-        print("Mode:", self.mode)
+        print("Targets:", self.targets)
+        print("Actions:", self.actions)
 
-        self.file_manager = FileManager(settings.OUTPUT_DIR, "twitter", self.mode)
+        label = self.targets[0] if self.targets else "twitter"
+        self.file_manager = FileManager(settings.OUTPUT_DIR, "twitter", label)
         self.agent_state = AgentState(
             os.path.join(settings.OUTPUT_DIR, "state", "twitter_agent_state.json")
         )
@@ -96,25 +130,35 @@ class TwitterScraper(BaseScraper):
             timeout=30,
         )
 
-        if self.mode == "follows":
+        if self.actions.get("follow_all"):
             self.follow_all()
-            self.scrape_follows()
-        elif self.mode == "home":
-            self.scrape_home()
 
-    def scrape_home(self):
-        print("Scraping Twitter home timeline.")
+        # Observation and actions are independent now (see config.yaml).
+        # main.validate_targets() already guaranteed exactly one valid
+        # target before this scraper was even constructed.
+        handler_name = self.OBSERVATION_HANDLERS[self.targets[0]]
+        getattr(self, handler_name)()
+
+    def fetch_for_you_feed(self):
+        print("Observing the For You feed.")
         self._scrape_timeline(
-            self.fetch_home_latest, TWITTER_HOME_TIMELINE_HASH, track_seen_ids=True
+            self.fetch_home_latest, HOME_TIMELINE_PATH, track_seen_ids=True
         )
 
-    def scrape_follows(self):
-        print("Scraping Twitter for all tweets from followed accounts.")
+    def fetch_home_timeline(self):
+        print("Observing the (chronological) Following timeline.")
         self._scrape_timeline(
-            self.fetch_follow_latest, TWITTER_HOME_LATEST_TIMELINE_HASH
+            self.fetch_follow_latest, HOME_TIMELINE_PATH
         )
 
-    def _scrape_timeline(self, fetch_fn, _hash, track_seen_ids=False):
+    def fetch_search_timeline(self):
+        query = settings.SEARCH_QUERY
+        print(f"Observing Search results for query: {query!r}")
+        self._scrape_timeline(
+            self.fetch_search_latest, SEARCH_TIMELINE_PATH, track_seen_ids=True
+        )
+
+    def _scrape_timeline(self, fetch_fn, timeline_path, track_seen_ids=False):
         cursor = None
         num_tweets = 0
 
@@ -131,7 +175,7 @@ class TwitterScraper(BaseScraper):
             self._collected_tweet_ids = OrderedDict()
 
         while True:
-            result = self._fetch_and_parse_with_retry(fetch_fn, cursor)
+            result = self._fetch_and_parse_with_retry(fetch_fn, cursor, timeline_path)
 
             if result is None:
                 print(
@@ -179,7 +223,7 @@ class TwitterScraper(BaseScraper):
 
             cursor = next_cursor
 
-    def _fetch_and_parse_with_retry(self, fetch_fn, cursor):
+    def _fetch_and_parse_with_retry(self, fetch_fn, cursor, timeline_path):
         """Fetches and parses the given cursor, retrying the SAME cursor with
         backoff on bad/rate-limited/malformed responses.
 
@@ -193,7 +237,7 @@ class TwitterScraper(BaseScraper):
             try:
                 data = fetch_fn(cursor)
                 time.sleep(settings.SCROLL_DELAY)
-                return parse_timeline(data)
+                return parse_timeline(data, timeline_path)
             except FetchFailedError as e:
                 wait = settings.FETCH_RETRY_BACKOFF * attempt
                 print(
@@ -217,7 +261,21 @@ class TwitterScraper(BaseScraper):
             "features": json.dumps(features),
         }
 
-        r = self.client.get(url, params=params)
+        # X.com's own frontend sends x-client-transaction-id (and, per a
+        # captured browser request, content-type: application/json) on
+        # every /i/api request, not just actions with a body. Home/Follows
+        # have tolerated their absence so far, but there's no reason to
+        # keep relying on that leniency, and Search's stricter bot checks
+        # don't.
+        path = url.removeprefix("https://x.com")
+        r = self.client.get(
+            url,
+            params=params,
+            headers={
+                "x-client-transaction-id": self._txid("GET", path),
+                "content-type": "application/json",
+            },
+        )
 
         if self._handle_rate_limit(r):
             reset = r.headers.get("x-rate-limit-reset")
@@ -232,7 +290,13 @@ class TwitterScraper(BaseScraper):
         except Exception:
             print("NON JSON RESPONSE:")
             print(f"status={r.status_code}")
-            print(r.text[:500])
+            # An empty/non-JSON body (as opposed to X's usual
+            # {"errors": [...]} JSON payload) usually means the request was
+            # rejected before reaching the GraphQL resolver at all (WAF/edge
+            # layer) rather than a real API-level error -- response headers
+            # often reveal which layer answered.
+            print(f"response headers={dict(r.headers)}")
+            print(f"body={r.text[:500]!r}")
             raise FetchFailedError(f"non-JSON response (status={r.status_code})")
 
     def fetch_follow_latest(self, cursor=None):
@@ -255,6 +319,42 @@ class TwitterScraper(BaseScraper):
         if cursor is None:
             variables["requestContext"] = "launch"
         return self._fetch_timeline(url, cursor, variables, TWITTER_HOME_TIMELINE_FEATURES)
+
+    def fetch_search_latest(self, cursor=None):
+        url = f"https://x.com/i/api/graphql/{TWITTER_SEARCH_TIMELINE_HASH}/SearchTimeline"
+        variables = {
+            "rawQuery": settings.SEARCH_QUERY,
+            "count": 20,
+            "querySource": "typed_query",
+            "product": "Top",
+            "withGrokTranslatedBio": True,
+            "withQuickPromoteEligibilityTweetFields": False,
+        }
+        return self._fetch_timeline(url, cursor, variables, TWITTER_SEARCH_TIMELINE_FEATURES)
+
+    def execute_action(self, action: str, target: str) -> bool:
+        """Generic action dispatcher: `action` is one of "like"/"retweet"/
+        "follow"/"mute", `target` is the relevant tweet_id or user_id.
+
+        This is the single entry point the future LLM-driven Agent Runtime
+        (roadmap Phase 4) will call with its decision output -- its
+        {action, target_object} maps directly onto (action, target) here.
+        Successful follow/mute actions also update local agent state, so
+        callers don't need to do that bookkeeping themselves.
+        """
+        handler_name = self.ACTION_HANDLERS.get(action)
+        if not handler_name:
+            raise ValueError(f"Unknown action: {action!r}. Must be one of {list(self.ACTION_HANDLERS)}.")
+
+        success = getattr(self, handler_name)(target)
+
+        if success:
+            if action == "follow":
+                self.agent_state.mark_followed(target)
+            elif action == "mute":
+                self.agent_state.mark_muted(target)
+
+        return success
 
     def _txid(self, method: str, path: str) -> str:
         return self.ct.generate(method, path)
@@ -371,13 +471,21 @@ class TwitterScraper(BaseScraper):
                 print(f"Already following {user_id} ({entry.get('_comment', '')}); skipping.")
                 continue
             print(f"Following user {user_id} ({entry.get('_comment', '')})...")
-            if not self.follow_user(user_id):
+            if not self.execute_action("follow", user_id):
                 break
-            self.agent_state.mark_followed(user_id)
             time.sleep(5)
 
 
-def parse_timeline(data):
+def parse_timeline(data, timeline_path):
+    """Parses a timeline response into (tweets, next_cursor).
+
+    `timeline_path` is the sequence of keys under `data[...]` that leads to
+    the `instructions` list -- e.g. HOME_TIMELINE_PATH for Home/Follows,
+    SEARCH_TIMELINE_PATH for Search (see path constants near the top of this
+    file). The entries within `instructions` follow the same tweet-*/
+    cursor-bottom-* shape across all three endpoints, so only the path to
+    reach them differs.
+    """
     tweets = []
 
     if "errors" in data:
@@ -387,8 +495,11 @@ def parse_timeline(data):
         raise FetchFailedError(f"API returned errors: {codes}")
 
     try:
-        instructions = data["data"]["home"]["home_timeline_urt"]["instructions"]
-    except KeyError:
+        node = data["data"]
+        for key in timeline_path:
+            node = node[key]
+        instructions = node["instructions"]
+    except (KeyError, TypeError):
         raise FetchFailedError(
             f"Unexpected response structure: {json.dumps(data)[:300]}"
         )
