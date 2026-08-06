@@ -1,0 +1,43 @@
+# Per-account credentials and optional per-account behavioral overrides.
+#
+# This file contains secrets (auth/bearer/csrf tokens for each X/Twitter
+# account) -- copy it to accounts.yaml and fill in real values. accounts.yaml
+# is gitignored, same as .env, and must never be committed.
+#
+# See README's Credentials section for how to extract auth_token/
+# bearer_token/csrf_token for a given account (same DevTools steps as before,
+# just once per account instead of once per repo).
+accounts:
+  - name: primary
+    auth_token: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    bearer_token: "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    csrf_token: xxxxxxxxxxxxxxxxxxxxxxxx
+    # Everything below is optional. Every one of config.yaml's top-level
+    # keys can be overridden here -- platform, scroll_delay,
+    # fetch_max_retries, fetch_retry_backoff, timezone, data_collection,
+    # actions, account_lists. Any key an account doesn't set falls back to
+    # the matching key in config.yaml (dict-valued keys like
+    # data_collection/actions/account_lists merge shallowly -- e.g. an
+    # account can override just `targets` below and still inherit
+    # `search_query` from config.yaml).
+    data_collection:
+      targets:
+        - for_you_feed
+    actions:
+      follow_all: true
+    account_lists:
+      follow_list: follow_user_ids.json
+
+  # Uncomment and fill in to run a second account alongside the first --
+  # each runs in its own thread with its own credentials, agent-state file,
+  # and output namespace (data/<date>/twitter/<name>/). This one also shows
+  # overriding scalar config.yaml keys, not just the dict-valued ones above.
+  # - name: secondary
+  #   auth_token: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  #   bearer_token: "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  #   csrf_token: xxxxxxxxxxxxxxxxxxxxxxxx
+  #   scroll_delay: 4          # overrides config.yaml's default for this account only
+  #   timezone: UTC            # overrides config.yaml's default for this account only
+  #   data_collection:
+  #     targets:
+  #       - home_timeline

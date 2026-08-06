@@ -1,3 +1,5 @@
+import threading
+
 from config import settings
 from scraper import SCRAPER_REGISTRY
 
@@ -19,23 +21,60 @@ def validate_targets(targets):
         )
 
 
+def validate_account(account):
+    if not account.platform:
+        raise ValueError(
+            f"Account '{account.name}': no platform set (set 'platform' in config.yaml "
+            f"or override it per-account in accounts.yaml)."
+        )
+    if account.platform not in SCRAPER_REGISTRY:
+        raise ValueError(f"Account '{account.name}': unsupported platform '{account.platform}'.")
+    validate_targets(account.targets)
+    if "search" in account.targets and not account.search_query:
+        raise ValueError(
+            f"Account '{account.name}': data_collection.search_query is required "
+            f"when targets includes 'search'."
+        )
+
+
+def run_account(account):
+    try:
+        scraper = SCRAPER_REGISTRY[account.platform](account)
+        scraper.run()
+    except Exception:
+        print(f"[{account.name}] Fatal error, this account's scraper has stopped:")
+        raise
+
+
 def main():
     settings.validate()
-    validate_targets(settings.DATA_COLLECTION_TARGETS)
-    if "search" in settings.DATA_COLLECTION_TARGETS and not settings.SEARCH_QUERY:
-        raise ValueError(
-            "config.yaml's data_collection.search_query is required when targets includes 'search'."
+    accounts = settings.load_accounts()
+
+    # Validate every account's resolved config up front, before spinning up
+    # any threads, so a typo in one account's overrides fails fast instead
+    # of surfacing only after the others are already mid-run.
+    for account in accounts:
+        validate_account(account)
+
+    # Each account's scraper.run() loops forever observing its own target,
+    # so every account needs its own thread -- this is a stand-in for the
+    # Experiment Orchestrator's per-agent activation scheduler (roadmap
+    # Phase 5), not that scheduler itself.
+    threads = [
+        threading.Thread(
+            target=run_account,
+            args=(account,),
+            name=account.name,
+            daemon=True,
         )
-    scraper_class = SCRAPER_REGISTRY.get(settings.PLATFORM)
-    if not scraper_class:
-        raise ValueError(f"Unsupported platform: {settings.PLATFORM}")
+        for account in accounts
+    ]
 
-    scraper = scraper_class(
-        targets=settings.DATA_COLLECTION_TARGETS,
-        actions=settings.ACTIONS,
-    )
-
-    scraper.run()
+    print(f"Starting {len(threads)} account(s): {', '.join(a.name for a in accounts)}")
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
 
 if __name__ == "__main__":

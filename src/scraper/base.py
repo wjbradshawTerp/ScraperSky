@@ -2,13 +2,8 @@ from abc import ABC, abstractmethod
 
 
 class BaseScraper(ABC):
-    def __init__(
-        self,
-        targets: list,
-        actions: dict,
-    ):
-        self.targets = targets
-        self.actions = actions
+    def __init__(self, account):
+        self.account = account
 
     @abstractmethod
     def run(self):

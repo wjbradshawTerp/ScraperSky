@@ -1,4 +1,5 @@
 .env
+accounts.yaml
 data/*
 !data/.gitkeep
 logs/

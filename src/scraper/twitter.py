@@ -101,28 +101,29 @@ class TwitterScraper(BaseScraper):
     }
 
     def run(self):
-        print("Running Twitter Scraper with the following parameters:")
-        print("Targets:", self.targets)
-        print("Actions:", self.actions)
+        account = self.account
+        self._log("Running Twitter Scraper with the following parameters:")
+        self._log(f"Targets: {account.targets}")
+        self._log(f"Actions: {account.actions}")
 
-        label = self.targets[0] if self.targets else "twitter"
-        self.file_manager = FileManager(settings.OUTPUT_DIR, "twitter", label)
+        label = account.targets[0] if account.targets else "twitter"
+        self.file_manager = FileManager(settings.OUTPUT_DIR, "twitter", label, account.name, account.timezone)
         self.agent_state = AgentState(
-            os.path.join(settings.OUTPUT_DIR, "state", "twitter_agent_state.json")
+            os.path.join(settings.OUTPUT_DIR, "state", account.name, "twitter_agent_state.json")
         )
 
-        print("Initialising x-client-transaction-id generator...")
+        self._log("Initialising x-client-transaction-id generator...")
         self.ct = fetch_and_init()
-        print("Transaction generator ready.")
+        self._log("Transaction generator ready.")
 
         self.client = httpx.Client(
             headers={
-                "authorization": settings.TWITTER_BEARER_TOKEN,
-                "x-csrf-token": settings.TWITTER_CSRF_TOKEN,
+                "authorization": account.bearer_token,
+                "x-csrf-token": account.csrf_token,
                 "x-twitter-active-user": "yes",
                 "x-twitter-client-language": "en",
                 "x-twitter-auth-type": "OAuth2Session",
-                "cookie": f"auth_token={settings.TWITTER_AUTH_TOKEN}; ct0={settings.TWITTER_CSRF_TOKEN}",
+                "cookie": f"auth_token={account.auth_token}; ct0={account.csrf_token}",
                 "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
                 "origin": "https://x.com",
                 "referer": "https://x.com/home",
@@ -130,30 +131,33 @@ class TwitterScraper(BaseScraper):
             timeout=30,
         )
 
-        if self.actions.get("follow_all"):
+        if account.actions.get("follow_all"):
             self.follow_all()
 
         # Observation and actions are independent now (see config.yaml).
         # main.validate_targets() already guaranteed exactly one valid
         # target before this scraper was even constructed.
-        handler_name = self.OBSERVATION_HANDLERS[self.targets[0]]
+        handler_name = self.OBSERVATION_HANDLERS[account.targets[0]]
         getattr(self, handler_name)()
 
+    def _log(self, message):
+        print(f"[{self.account.name}] {message}")
+
     def fetch_for_you_feed(self):
-        print("Observing the For You feed.")
+        self._log("Observing the For You feed.")
         self._scrape_timeline(
             self.fetch_home_latest, HOME_TIMELINE_PATH, track_seen_ids=True
         )
 
     def fetch_home_timeline(self):
-        print("Observing the (chronological) Following timeline.")
+        self._log("Observing the (chronological) Following timeline.")
         self._scrape_timeline(
             self.fetch_follow_latest, HOME_TIMELINE_PATH
         )
 
     def fetch_search_timeline(self):
-        query = settings.SEARCH_QUERY
-        print(f"Observing Search results for query: {query!r}")
+        query = self.account.search_query
+        self._log(f"Observing Search results for query: {query!r}")
         self._scrape_timeline(
             self.fetch_search_latest, SEARCH_TIMELINE_PATH, track_seen_ids=True
         )
@@ -178,7 +182,7 @@ class TwitterScraper(BaseScraper):
             result = self._fetch_and_parse_with_retry(fetch_fn, cursor, timeline_path)
 
             if result is None:
-                print(
+                self._log(
                     "Giving up on this cursor after repeated failures; "
                     "restarting timeline from the top."
                 )
@@ -201,7 +205,7 @@ class TwitterScraper(BaseScraper):
 
                 skipped = len(tweets) - len(new_tweets)
                 if skipped:
-                    print(f"Filtered {skipped} duplicate tweet(s) already collected this run.")
+                    self._log(f"Filtered {skipped} duplicate tweet(s) already collected this run.")
 
                 self.seen_tweet_ids = [
                     tweet.get("tweet_id") for tweet in tweets if tweet.get("tweet_id")
@@ -209,12 +213,12 @@ class TwitterScraper(BaseScraper):
                 tweets = new_tweets
 
             num_tweets += len(tweets)
-            print(f"{num_tweets} tweets collected")
+            self._log(f"{num_tweets} tweets collected")
             if tweets:
                 self.file_manager.save_data(tweets)
 
             if not next_cursor or next_cursor == cursor:
-                print(
+                self._log(
                     "Bottom of pagination reached (no new cursor); "
                     "restarting timeline from the top to keep running indefinitely."
                 )
@@ -233,15 +237,16 @@ class TwitterScraper(BaseScraper):
 
         Returns (tweets, next_cursor), or None if all retries are exhausted.
         """
-        for attempt in range(1, settings.FETCH_MAX_RETRIES + 1):
+        account = self.account
+        for attempt in range(1, account.fetch_max_retries + 1):
             try:
                 data = fetch_fn(cursor)
-                time.sleep(settings.SCROLL_DELAY)
+                time.sleep(account.scroll_delay)
                 return parse_timeline(data, timeline_path)
             except FetchFailedError as e:
-                wait = settings.FETCH_RETRY_BACKOFF * attempt
-                print(
-                    f"Fetch failed (attempt {attempt}/{settings.FETCH_MAX_RETRIES}): "
+                wait = account.fetch_retry_backoff * attempt
+                self._log(
+                    f"Fetch failed (attempt {attempt}/{account.fetch_max_retries}): "
                     f"{e}. Retrying same cursor in {wait}s..."
                 )
                 time.sleep(wait)
@@ -281,22 +286,22 @@ class TwitterScraper(BaseScraper):
             reset = r.headers.get("x-rate-limit-reset")
             if reset:
                 wait = max(int(reset) - int(time.time()), 1)
-                print(f"Sleeping {wait}s until rate limit resets...")
+                self._log(f"Sleeping {wait}s until rate limit resets...")
                 time.sleep(wait)
             raise FetchFailedError(f"rate limited (status={r.status_code})")
 
         try:
             return r.json()
         except Exception:
-            print("NON JSON RESPONSE:")
-            print(f"status={r.status_code}")
+            self._log("NON JSON RESPONSE:")
+            self._log(f"status={r.status_code}")
             # An empty/non-JSON body (as opposed to X's usual
             # {"errors": [...]} JSON payload) usually means the request was
             # rejected before reaching the GraphQL resolver at all (WAF/edge
             # layer) rather than a real API-level error -- response headers
             # often reveal which layer answered.
-            print(f"response headers={dict(r.headers)}")
-            print(f"body={r.text[:500]!r}")
+            self._log(f"response headers={dict(r.headers)}")
+            self._log(f"body={r.text[:500]!r}")
             raise FetchFailedError(f"non-JSON response (status={r.status_code})")
 
     def fetch_follow_latest(self, cursor=None):
@@ -323,7 +328,7 @@ class TwitterScraper(BaseScraper):
     def fetch_search_latest(self, cursor=None):
         url = f"https://x.com/i/api/graphql/{TWITTER_SEARCH_TIMELINE_HASH}/SearchTimeline"
         variables = {
-            "rawQuery": settings.SEARCH_QUERY,
+            "rawQuery": self.account.search_query,
             "count": 20,
             "querySource": "typed_query",
             "product": "Top",
@@ -366,12 +371,12 @@ class TwitterScraper(BaseScraper):
         reset = r.headers.get("x-rate-limit-reset")
         limit = r.headers.get("x-rate-limit-limit")
         remaining = r.headers.get("x-rate-limit-remaining")
-        print(f"Rate limited — limit={limit}, remaining={remaining}, resets_at={reset}")
+        self._log(f"Rate limited — limit={limit}, remaining={remaining}, resets_at={reset}")
         if reset:
             reset_dt = datetime.datetime.fromtimestamp(
                 int(reset), tz=datetime.timezone.utc
             )
-            print(f"Reset time (UTC): {reset_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            self._log(f"Reset time (UTC): {reset_dt.strftime('%Y-%m-%d %H:%M:%S')}")
         return True
 
     def favorite_tweet(self, tweet_id: str) -> bool:
@@ -389,11 +394,11 @@ class TwitterScraper(BaseScraper):
                 }
             ),
         )
-        print(r.status_code, r.reason_phrase)
+        self._log(f"{r.status_code} {r.reason_phrase}")
         if self._handle_rate_limit(r):
             return False
         if r.status_code != 200:
-            print(f"response: {r.text[:500]}")
+            self._log(f"response: {r.text[:500]}")
         return r.status_code == 200
 
     def retweet(self, tweet_id: str) -> bool:
@@ -411,11 +416,11 @@ class TwitterScraper(BaseScraper):
                 }
             ),
         )
-        print(r.status_code, r.reason_phrase)
+        self._log(f"{r.status_code} {r.reason_phrase}")
         if self._handle_rate_limit(r):
             return False
         if r.status_code != 200:
-            print(f"response: {r.text[:500]}")
+            self._log(f"response: {r.text[:500]}")
         return r.status_code == 200
 
     def mute_user(self, user_id: str) -> bool:
@@ -428,11 +433,11 @@ class TwitterScraper(BaseScraper):
             },
             content=f"user_id={user_id}",
         )
-        print(r.status_code, r.reason_phrase)
+        self._log(f"{r.status_code} {r.reason_phrase}")
         if self._handle_rate_limit(r):
             return False
         if r.status_code != 200:
-            print(f"response: {r.text[:500]}")
+            self._log(f"response: {r.text[:500]}")
         return r.status_code == 200
 
     def follow_user(self, user_id: str) -> bool:
@@ -452,25 +457,25 @@ class TwitterScraper(BaseScraper):
             },
             content=body,
         )
-        print(r.status_code, r.reason_phrase)
+        self._log(f"{r.status_code} {r.reason_phrase}")
         if self._handle_rate_limit(r):
             return False
         if r.status_code != 200:
-            print(f"response: {r.text[:500]}")
+            self._log(f"response: {r.text[:500]}")
             return False
         return True
 
     def follow_all(self):
-        list_path = settings.get_account_list_path("follow_list")
+        list_path = self.account.get_account_list_path("follow_list")
         with open(list_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         for entry in data["users"]:
             user_id = entry["user_id"]
             if self.agent_state.is_following(user_id):
-                print(f"Already following {user_id} ({entry.get('_comment', '')}); skipping.")
+                self._log(f"Already following {user_id} ({entry.get('_comment', '')}); skipping.")
                 continue
-            print(f"Following user {user_id} ({entry.get('_comment', '')})...")
+            self._log(f"Following user {user_id} ({entry.get('_comment', '')})...")
             if not self.execute_action("follow", user_id):
                 break
             time.sleep(5)

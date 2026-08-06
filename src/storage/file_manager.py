@@ -2,27 +2,27 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
-from config import settings
-
-LOCAL_TZ = ZoneInfo(settings.TIMEZONE)
 
 
-# This class manages file creation and data saving for scraped data, organizing files by date and platform.
+# This class manages file creation and data saving for scraped data, organizing files by date, platform, and account.
 class FileManager:
-    def __init__(self, base_output_dir, platform, mode):
+    def __init__(self, base_output_dir, platform, mode, account_name, timezone):
         self.base_output_dir = Path(base_output_dir)
         self.platform = platform
-        self.run_id = datetime.now(LOCAL_TZ).strftime("%Y%m%d-%H%M%S")
+        self.account_name = account_name
+        self.local_tz = ZoneInfo(timezone)
+        self.run_id = datetime.now(self.local_tz).strftime("%Y%m%d-%H%M%S")
         self.metadata = {
             "run_id": self.run_id,
             "platform": platform,
             "mode": mode,
+            "account": account_name,
         }
         self.current_date = None
         self.current_file = None
 
     def _get_today_str(self):
-        return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+        return datetime.now(self.local_tz).strftime("%Y-%m-%d")
 
     def _ensure_file(self):
         today = self._get_today_str()
@@ -31,7 +31,9 @@ class FileManager:
         if self.current_date != today:
             self.current_date = today
 
-            output_dir = self.base_output_dir / self.current_date / self.platform
+            # Namespaced by account so concurrent accounts' JSONL output
+            # never collides (see roadmap Phase 3 -- multi-account support).
+            output_dir = self.base_output_dir / self.current_date / self.platform / self.account_name
             output_dir.mkdir(parents=True, exist_ok=True)
 
             filename = f"run_{self.run_id}.jsonl"
@@ -44,7 +46,7 @@ class FileManager:
 
         record = {
             "metadata": self.metadata,
-            "timestamp": datetime.now(LOCAL_TZ).isoformat(),
+            "timestamp": datetime.now(self.local_tz).isoformat(),
             "data": data,
         }
 
