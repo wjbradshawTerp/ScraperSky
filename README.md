@@ -2,7 +2,8 @@
 X/Twitter account orchestration and scraping system.
 
 ## Requirements
-[Docker Engine](https://docs.docker.com/engine/install)
+- [Docker Engine](https://docs.docker.com/engine/install)
+- [Ollama](https://ollama.com/download) with the [`qwen2.5:14b`](https://ollama.com/library/qwen2.5:14b) model pulled — only needed for accounts running the **Agent Runtime** (`sockpuppet_config.persona_prompt`, see below); not required otherwise.
 
 ## Installation
 1. Clone repo:
@@ -17,6 +18,12 @@ cp accounts.yaml.example accounts.yaml
 ```
 3. Open `accounts.yaml` and fill in credentials for each account you want to run (see below).
 4. Review `config.yaml` and adjust `data_collection.targets`/`platform`/etc. as needed (defaults work out of the box; per-account overrides live in `accounts.yaml`).
+5. **Only if running the Agent Runtime** (any account has `sockpuppet_config.persona_prompt` set): install [Ollama](https://ollama.com/download), pull the model, and start the server:
+```bash
+ollama pull qwen2.5:14b
+ollama serve
+```
+   Running via `docker compose up` needs `OLLAMA_BASE_URL` set in `.env` so the container can reach Ollama on your host — see `.env.example` and the Agent Runtime section below.
 
 ## Credentials
 
