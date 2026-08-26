@@ -4,6 +4,9 @@ data/*
 !data/.gitkeep
 logs/
 
+personas/*
+!personas/example_persona.txt.example
+
 __pycache__/
 *.pyc
 *.pyo

@@ -10,9 +10,13 @@ class BaseScraper(ABC):
         pass
 
     @abstractmethod
-    def fetch_for_you_feed(self):
+    def fetch_home(self):
+        """Observes the "home" target: X's algorithmic default feed (the
+        "Home" tab, GraphQL operation `HomeTimeline`)."""
         pass
 
     @abstractmethod
-    def fetch_home_timeline(self):
+    def fetch_following(self):
+        """Observes the "following" target: X's reverse-chronological feed
+        (the "Following" tab, GraphQL operation `HomeLatestTimeline`)."""
         pass

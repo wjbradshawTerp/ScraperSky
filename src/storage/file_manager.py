@@ -6,12 +6,17 @@ import json
 
 # This class manages file creation and data saving for scraped data, organizing files by date, platform, and account.
 class FileManager:
-    def __init__(self, base_output_dir, platform, mode, account_name, timezone):
+    def __init__(self, base_output_dir, platform, mode, account_name, timezone, stream=None):
         self.base_output_dir = Path(base_output_dir)
         self.platform = platform
         self.account_name = account_name
         self.local_tz = ZoneInfo(timezone)
         self.run_id = datetime.now(self.local_tz).strftime("%Y%m%d-%H%M%S")
+        # `stream` disambiguates the filename when an account has more than
+        # one FileManager writing concurrently (e.g. platform observations
+        # vs. Agent Runtime logs -- roadmap Phase 4/6). None preserves the
+        # original filename exactly for existing single-stream callers.
+        self.stream = stream
         self.metadata = {
             "run_id": self.run_id,
             "platform": platform,
@@ -36,7 +41,8 @@ class FileManager:
             output_dir = self.base_output_dir / self.current_date / self.platform / self.account_name
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            filename = f"run_{self.run_id}.jsonl"
+            suffix = f"_{self.stream}" if self.stream else ""
+            filename = f"run_{self.run_id}{suffix}.jsonl"
             self.current_file = output_dir / filename
 
         return self.current_file

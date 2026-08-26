@@ -12,27 +12,39 @@ platform: twitter
 # data_collection.targets: which timeline(s) to observe this run. Each
 # entry maps to an observation method on the scraper (see
 # src/scraper/twitter.py):
-#   for_you_feed  - algorithmic "For You" timeline (fetch_for_you_feed)
-#   home_timeline - chronological Following timeline (fetch_home_timeline)
-#   search        - keyword search results (fetch_search_timeline);
-#                   requires search_query to be set below
+#   home      - X's algorithmic default feed, i.e. the "Home" tab.
+#               GraphQL operation `HomeTimeline` (fetch_home).
+#   following - X's reverse-chronological feed, i.e. the "Following" tab.
+#               GraphQL operation `HomeLatestTimeline` (fetch_following).
+#   search    - keyword search results (fetch_search_timeline);
+#               requires search_query to be set below
+# `home` and `following` are easy to mix up by name alone since X's own
+# GraphQL operation names (HomeTimeline / HomeLatestTimeline) don't map onto
+# "home"/"following" in an obvious way at a glance -- see the naming key
+# comment near the top of src/scraper/twitter.py if in doubt.
+#
 # Observation is decoupled from actions (see `actions` below) -- previously
 # a single "mode" controlled both what was scraped AND whether follow_all()
 # ran; now they're independent.
 #
-# NOTE: exactly one target is supported for now. The scraper is still a
-# single-threaded process that scrapes one timeline continuously; true
-# simultaneous multi-target polling arrives with the Agent Runtime's
-# decision cycle (roadmap Phase 4), which is why this is already
-# list-shaped even though only one entry is used today.
+# NOTE: exactly one target is supported outside Agent Runtime mode (see
+# `sockpuppet_config.persona_prompt` below) -- the old scripted path is
+# still a single-threaded process that scrapes one timeline continuously.
+# Agent Runtime mode observes a snapshot of every listed target each
+# activation, so multiple entries are fine there (roadmap Phase 4).
 data_collection:
   targets:
-    - for_you_feed
+    - home
 
   # Query text for the "search" target above (X's "All of these words"
   # search — plain keywords, no special query-operator handling yet).
   # Only read when "search" is one of the targets.
   search_query: trump
+
+  # "full" (default) logs the constructed prompt + raw model output in the
+  # Agent Runtime's runtime_log JSONL; "minimal" logs just the decision/
+  # execution trace. Only meaningful in Agent Runtime mode.
+  # logging: full
 
 # actions: non-LLM scripted actions to run once at startup, before
 # observation begins. This is a stand-in for the future LLM-driven action
@@ -52,6 +64,22 @@ scroll_delay: 2
 fetch_max_retries: 5
 fetch_retry_backoff: 5
 
+# Exponential backoff for the opposite problem: fetches are succeeding but
+# returning nothing NEW (every tweet in the batch was already collected this
+# run -- see the dedup logic in _scrape_timeline for home/search).
+# This happens when polling faster than the feed refreshes and just hammers
+# the API for no benefit. Each consecutive all-duplicate batch roughly
+# doubles the wait (empty_batch_backoff_base * 2^n), capped at
+# empty_batch_backoff_max; a batch with any new tweet resets the backoff to
+# zero. This wait is on top of scroll_delay, not a replacement for it.
+#
+# empty_batch_backoff_jitter randomizes each wait by +/- this fraction (0.2 =
+# +/-20%) so the cadence isn't a mechanically clean 1x/2x/4x/8x/... sequence
+# -- a perfect power-of-two backoff is itself a detectable non-human pattern.
+empty_batch_backoff_base: 5
+empty_batch_backoff_max: 300
+empty_batch_backoff_jitter: 0.2
+
 # Timezone used for timestamping output files/records (IANA zoneinfo key,
 # e.g. "America/New_York", "UTC").
 timezone: America/New_York
@@ -68,3 +96,62 @@ timezone: America/New_York
 # a given name.
 account_lists:
   follow_list: follow_user_ids.json
+
+# sockpuppet_config.initialization_params: cold-start initialization
+# (roadmap Phase 4a). When set (here or per-account) and this account's
+# agent_state hasn't already recorded initialization as complete, the
+# scraper follows accounts from `account_lists` below and likes/reposts
+# tweets from its own For You feed -- self-throttled to stay under the
+# live follow rate limit (see TwitterScraper.FOLLOW_RATE_LIMIT) -- until
+# min_follows/min_engagements are met or max_initialization_days elapses.
+# This runs BEFORE observation/data_collection begins for that account.
+#
+# Commented out by default: this performs real follow/like/repost actions
+# against the live account, so uncomment and set real values deliberately.
+# account_lists referenced here must already exist in the account_lists
+# map above.
+#
+# sockpuppet_config:
+#   account_lists:
+#     - follow_list
+#   initialization_params:
+#     min_follows: 15
+#     min_engagements: 15
+#     max_initialization_days: 3
+
+# sockpuppet_config.persona_prompt: enables the Agent Runtime (roadmap
+# Phase 4) -- the LLM-driven Observation -> Prompt Construction -> Decision
+# -> Execution -> Logging cycle, using LangChain (via langchain-ollama,
+# against a LOCAL Ollama server -- see .env.example's OLLAMA_BASE_URL note,
+# especially if running via docker compose). Runs AFTER cold-start,
+# REPLACING the old scripted single-target observation loop for this
+# account. Path is resolved relative to this file's directory, same as
+# account_lists.
+#
+# `phase`/`treatment_arm` are stand-ins for what the Experiment Orchestrator
+# (roadmap Phase 5) will assign per-agent once it exists -- set manually for
+# now. `activation_schedule` controls how long the runtime waits between
+# decision cycles; `truncated_powerlaw` is approximated as a log-uniform
+# draw over [min_interval, max_interval] (see TwitterScraper.
+# _sample_activation_interval).
+#
+# Commented out by default: this makes real LLM calls and real
+# follow/like/repost/mute actions against the live account.
+#
+# sockpuppet_config:
+#   persona_prompt: personas/example_persona.txt
+#   phase: pre_treatment
+#   treatment_arm: control
+#   activation_schedule:
+#     distribution: truncated_powerlaw
+#     min_interval: 15m
+#     max_interval: 6h
+
+# experiment_design.experiment_name: used to build a readable experiment_id
+# (`<experiment_name>::<account_name>`) in the Agent Runtime's
+# experiment_context. The paper's other experiment_design fields
+# (treatment_arms, randomization, phase_durations) belong to the Experiment
+# Orchestrator (roadmap Phase 5) and aren't read by anything yet.
+#
+# experiment_design:
+#   experiment_name: mercury_muting

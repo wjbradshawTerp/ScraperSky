@@ -14,15 +14,18 @@ accounts:
     csrf_token: xxxxxxxxxxxxxxxxxxxxxxxx
     # Everything below is optional. Every one of config.yaml's top-level
     # keys can be overridden here -- platform, scroll_delay,
-    # fetch_max_retries, fetch_retry_backoff, timezone, data_collection,
-    # actions, account_lists. Any key an account doesn't set falls back to
-    # the matching key in config.yaml (dict-valued keys like
-    # data_collection/actions/account_lists merge shallowly -- e.g. an
+    # fetch_max_retries, fetch_retry_backoff, empty_batch_backoff_base,
+    # empty_batch_backoff_max, empty_batch_backoff_jitter, timezone,
+    # data_collection, actions, account_lists, sockpuppet_config,
+    # experiment_design. Any key
+    # an account doesn't set falls back to the matching key in config.yaml
+    # (dict-valued keys like data_collection/actions/account_lists/
+    # sockpuppet_config/experiment_design merge shallowly -- e.g. an
     # account can override just `targets` below and still inherit
     # `search_query` from config.yaml).
     data_collection:
       targets:
-        - for_you_feed
+        - home
     actions:
       follow_all: true
     account_lists:
@@ -40,4 +43,68 @@ accounts:
   #   timezone: UTC            # overrides config.yaml's default for this account only
   #   data_collection:
   #     targets:
-  #       - home_timeline
+  #       - following
+
+  # ---------------------------------------------------------------------
+  # REFERENCE ONLY -- every field this codebase currently reads from an
+  # account entry, in one place, so nothing gets missed when writing a
+  # real config. Not meant to be uncommented and used verbatim (it mixes
+  # incompatible settings, e.g. a single `data_collection.targets` entry
+  # AND multiple targets, cold-start AND Agent Runtime mode at once).
+  # When adding a new per-account-overridable field to src/config.py,
+  # add it here too, with a comment, so this stays exhaustive.
+  # ---------------------------------------------------------------------
+  # - name: reference_example              # required. Namespaces this account's output/state/logs.
+  #   auth_token: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx           # required
+  #   bearer_token: "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # required
+  #   csrf_token: xxxxxxxxxxxxxxxxxxxxxxxx                          # required
+  #
+  #   # --- Scalar overrides of config.yaml's top-level defaults ---
+  #   platform: twitter                    # which scraper implementation (see src/scraper/__init__.py's SCRAPER_REGISTRY)
+  #   scroll_delay: 2                      # seconds between timeline fetch requests
+  #   fetch_max_retries: 5                 # retries for one pagination cursor before giving up
+  #   fetch_retry_backoff: 5               # base seconds for retry backoff (x attempt number)
+  #   empty_batch_backoff_base: 5          # base seconds for the all-duplicates backoff (roughly doubles each consecutive empty batch)
+  #   empty_batch_backoff_max: 300         # cap in seconds for that backoff
+  #   empty_batch_backoff_jitter: 0.2      # randomize each backoff wait by +/- this fraction (0.2 = +/-20%)
+  #   timezone: America/New_York           # IANA zoneinfo key, used for output file timestamps
+  #
+  #   # --- data_collection: what gets observed, and how it's logged ---
+  #   data_collection:
+  #     targets:                           # home (X's "Home" tab, GraphQL HomeTimeline) / following (X's "Following" tab, GraphQL HomeLatestTimeline) / search -- exactly one
+  #       - home                            # unless Agent Runtime mode is enabled (persona_prompt set), which allows several
+  #     search_query: trump                 # required if "search" is a target; plain keywords only
+  #     logging: full                       # full (default) or minimal -- controls whether the Agent
+  #                                          # Runtime's runtime_log JSONL includes the constructed
+  #                                          # prompt + raw model output, or just the decision/execution trace
+  #
+  #   # --- actions: non-LLM scripted actions run once at startup ---
+  #   actions:
+  #     follow_all: true                    # run follow_all() at startup, following everyone in the follow_list account list
+  #
+  #   # --- account_lists: named collections of accounts (arbitrary names) ---
+  #   account_lists:
+  #     follow_list: follow_user_ids.json             # consumed by follow_all()
+  #     untrustworthy_sources: untrustworthy.json     # e.g. referenced by sockpuppet_config below
+  #     prominent_news_sources: news_sources.json     # e.g. referenced by sockpuppet_config below
+  #
+  #   # --- sockpuppet_config: cold-start initialization + Agent Runtime ---
+  #   sockpuppet_config:
+  #     account_lists:                      # which account_lists (by name, from above) cold-start draws candidates from
+  #       - untrustworthy_sources
+  #       - prominent_news_sources
+  #     initialization_params:              # enables cold-start (roadmap Phase 4a) when set
+  #       min_follows: 15                   # stop following once at least this many accounts are followed
+  #       min_engagements: 15                # stop liking/reposting once at least this many engagement events are recorded
+  #       max_initialization_days: 3         # give up after this many days even if criteria above aren't met
+  #     persona_prompt: personas/example_persona.txt   # path to a persona text file -- enables Agent Runtime mode (roadmap Phase 4) when set
+  #     phase: pre_treatment                # initialization / pre_treatment / post_treatment -- stand-in for the Experiment Orchestrator (Phase 5)
+  #     treatment_arm: control              # stand-in for the orchestrator's real randomized treatment assignment (Phase 5)
+  #     activation_schedule:                 # how long the Agent Runtime waits between decision cycles
+  #       distribution: truncated_powerlaw   # uniform or truncated_powerlaw
+  #       min_interval: 15m                  # shorthand duration: Ns / Nm / Nh / Nd
+  #       max_interval: 6h
+  #
+  #   # --- experiment_design: experiment-level metadata ---
+  #   experiment_design:
+  #     experiment_name: mercury_muting      # used to build a readable experiment_id (<experiment_name>::<account_name>)

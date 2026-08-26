@@ -1,21 +1,40 @@
 import datetime
 import httpx
 import os
+import random
 import time
 import json
+import uuid
+from typing import Optional
 from collections import OrderedDict
 from scraper.base import BaseScraper
 from scraper.x_client import fetch_and_init
 from config import settings
 from storage.file_manager import FileManager
 from storage.agent_state import AgentState
+from runtime.decision import DecisionEngine
+from runtime.prompt import construct_prompt
+from utils.duration import parse_duration
 
-TWITTER_HOME_LATEST_TIMELINE_HASH = "KLMY6cZZUfQrLubs5DHHtQ"
-TWITTER_HOME_TIMELINE_HASH = "3b9_7tltt0hJRef-xm_3sw"
+# Naming key, since these two GraphQL operation names are easy to conflate:
+#   - `HomeTimeline`       -- X's algorithmic default feed, i.e. the "Home"
+#                             tab. Our config/target name for this is "home".
+#   - `HomeLatestTimeline` -- X's reverse-chronological feed, i.e. the
+#                             "Following" tab. Our config/target name for
+#                             this is "following".
+# Every method/constant below that touches one of these two endpoints is
+# named after exactly which one it is, specifically to avoid the mixup.
+TWITTER_HOME_LATEST_TIMELINE_HASH = "KLMY6cZZUfQrLubs5DHHtQ"  # HomeLatestTimeline -> "following"
+TWITTER_HOME_TIMELINE_HASH = "3b9_7tltt0hJRef-xm_3sw"  # HomeTimeline -> "home"
 TWITTER_SEARCH_TIMELINE_HASH = "BGd0T_j7oVwlW5U79tO_0A"
 
 # Response paths (under data[...]) each endpoint nests its `instructions`
-# list under -- see parse_timeline().
+# list under -- see parse_timeline(). HOME_TIMELINE_PATH is shared by BOTH
+# HomeTimeline ("home") and HomeLatestTimeline ("following") responses --
+# X nests both under the same `data.home.home_timeline_urt` envelope, so
+# this name reflects X's shared response shape, not either target
+# specifically; don't read it as meaning "the home_timeline target" (that
+# target name no longer exists -- see the naming key above).
 HOME_TIMELINE_PATH = ("home", "home_timeline_urt")
 SEARCH_TIMELINE_PATH = ("search_by_raw_query", "search_timeline", "timeline")
 
@@ -73,8 +92,20 @@ TWITTER_HOME_TIMELINE_FEATURES = {
 TWITTER_SEARCH_TIMELINE_FEATURES = dict(TWITTER_HOME_TIMELINE_FEATURES)
 
 # Local output-integrity safety net for observation methods that track seen
-# ids (fetch_for_you_feed, fetch_search_timeline); not sent over the wire.
+# ids (fetch_home, fetch_search_timeline); not sent over the wire.
 _DEDUP_CACHE_SIZE = 5000
+
+# Documented live follow rate limit (see ROADMAP.md's rate-limit note) --
+# cold-start self-throttles follows to stay under this instead of relying on
+# reactive 429 handling, since a burst of 429s makes little progress and
+# looks more automated than pacing does.
+FOLLOW_RATE_LIMIT = 15
+FOLLOW_RATE_WINDOW_SECONDS = 15 * 60
+
+# How many of the account's own past interactions to show the LLM each
+# decision cycle, so it can avoid re-liking/re-following something it
+# already acted on (roadmap Phase 4e follow-up -- see run_agent_runtime).
+RECENT_INTERACTIONS_WINDOW = 10
 
 
 class FetchFailedError(Exception):
@@ -93,10 +124,12 @@ class TwitterScraper(BaseScraper):
     }
 
     # Maps a data_collection target name to the observation method that
-    # serves it.
+    # serves it. "home" = X's algorithmic default feed (GraphQL
+    # `HomeTimeline`); "following" = X's reverse-chronological feed (GraphQL
+    # `HomeLatestTimeline`) -- see the naming key near the top of this file.
     OBSERVATION_HANDLERS = {
-        "for_you_feed": "fetch_for_you_feed",
-        "home_timeline": "fetch_home_timeline",
+        "home": "fetch_home",
+        "following": "fetch_following",
         "search": "fetch_search_timeline",
     }
 
@@ -111,6 +144,10 @@ class TwitterScraper(BaseScraper):
         self.agent_state = AgentState(
             os.path.join(settings.OUTPUT_DIR, "state", account.name, "twitter_agent_state.json")
         )
+        if account.agent_runtime_enabled:
+            self.runtime_file_manager = FileManager(
+                settings.OUTPUT_DIR, "twitter", "runtime_log", account.name, account.timezone, stream="runtime_log"
+            )
 
         self._log("Initialising x-client-transaction-id generator...")
         self.ct = fetch_and_init()
@@ -134,25 +171,42 @@ class TwitterScraper(BaseScraper):
         if account.actions.get("follow_all"):
             self.follow_all()
 
+        self.run_cold_start()
+
+        if account.agent_runtime_enabled:
+            # LLM-driven decision cycle (roadmap Phase 4) -- observes every
+            # configured target each activation rather than one target
+            # continuously.
+            self.run_agent_runtime()
+            return
+
         # Observation and actions are independent now (see config.yaml).
         # main.validate_targets() already guaranteed exactly one valid
-        # target before this scraper was even constructed.
+        # target before this scraper was even constructed, when not in
+        # Agent Runtime mode.
         handler_name = self.OBSERVATION_HANDLERS[account.targets[0]]
         getattr(self, handler_name)()
 
     def _log(self, message):
         print(f"[{self.account.name}] {message}")
 
-    def fetch_for_you_feed(self):
-        self._log("Observing the For You feed.")
+    def fetch_home(self):
+        """Observes the "home" target: X's algorithmic default feed (the
+        "Home" tab; GraphQL operation `HomeTimeline`, see `fetch_home_timeline()`).
+        """
+        self._log("Observing Home (X's algorithmic default feed, GraphQL HomeTimeline).")
         self._scrape_timeline(
-            self.fetch_home_latest, HOME_TIMELINE_PATH, track_seen_ids=True
+            self.fetch_home_timeline, HOME_TIMELINE_PATH, track_seen_ids=True
         )
 
-    def fetch_home_timeline(self):
-        self._log("Observing the (chronological) Following timeline.")
+    def fetch_following(self):
+        """Observes the "following" target: X's reverse-chronological feed
+        (the "Following" tab; GraphQL operation `HomeLatestTimeline`, see
+        `fetch_home_latest_timeline()`).
+        """
+        self._log("Observing Following (X's chronological feed, GraphQL HomeLatestTimeline).")
         self._scrape_timeline(
-            self.fetch_follow_latest, HOME_TIMELINE_PATH
+            self.fetch_home_latest_timeline, HOME_TIMELINE_PATH
         )
 
     def fetch_search_timeline(self):
@@ -165,6 +219,7 @@ class TwitterScraper(BaseScraper):
     def _scrape_timeline(self, fetch_fn, timeline_path, track_seen_ids=False):
         cursor = None
         num_tweets = 0
+        consecutive_empty_batches = 0
 
         if track_seen_ids:
             # Rolling: IDs from the page we just fetched, echoed back to
@@ -211,6 +266,24 @@ class TwitterScraper(BaseScraper):
                     tweet.get("tweet_id") for tweet in tweets if tweet.get("tweet_id")
                 ]
                 tweets = new_tweets
+
+                if not tweets:
+                    consecutive_empty_batches += 1
+                    doubled = self.account.empty_batch_backoff_base * (2 ** (consecutive_empty_batches - 1))
+                    jitter = self.account.empty_batch_backoff_jitter
+                    # Jittered around the doubled value rather than doubling
+                    # exactly every time -- a perfectly clean 1x/2x/4x/8x...
+                    # cadence is a mechanical tell; real usage doesn't wait in
+                    # neat powers of two.
+                    jittered = doubled * random.uniform(1 - jitter, 1 + jitter)
+                    wait = max(0.0, min(jittered, self.account.empty_batch_backoff_max))
+                    self._log(
+                        f"No new tweets in this batch ({consecutive_empty_batches} in a row); "
+                        f"backing off for {wait:.0f}s before the next fetch."
+                    )
+                    time.sleep(wait)
+                else:
+                    consecutive_empty_batches = 0
 
             num_tweets += len(tweets)
             self._log(f"{num_tweets} tweets collected")
@@ -268,7 +341,7 @@ class TwitterScraper(BaseScraper):
 
         # X.com's own frontend sends x-client-transaction-id (and, per a
         # captured browser request, content-type: application/json) on
-        # every /i/api request, not just actions with a body. Home/Follows
+        # every /i/api request, not just actions with a body. Home/Following
         # have tolerated their absence so far, but there's no reason to
         # keep relying on that leniency, and Search's stricter bot checks
         # don't.
@@ -304,7 +377,12 @@ class TwitterScraper(BaseScraper):
             self._log(f"body={r.text[:500]!r}")
             raise FetchFailedError(f"non-JSON response (status={r.status_code})")
 
-    def fetch_follow_latest(self, cursor=None):
+    def fetch_home_latest_timeline(self, cursor=None):
+        """Calls GraphQL operation `HomeLatestTimeline` -- X's reverse-
+        chronological feed, i.e. the "Following" tab. Backs the "following"
+        target (see `fetch_following()`). Named after the GraphQL operation
+        itself, not the target, so it's never ambiguous which one this is.
+        """
         url = f"https://x.com/i/api/graphql/{TWITTER_HOME_LATEST_TIMELINE_HASH}/HomeLatestTimeline"
         variables = {
             "count": 20,
@@ -314,7 +392,12 @@ class TwitterScraper(BaseScraper):
         }
         return self._fetch_timeline(url, cursor, variables, {})
 
-    def fetch_home_latest(self, cursor=None):
+    def fetch_home_timeline(self, cursor=None):
+        """Calls GraphQL operation `HomeTimeline` -- X's algorithmic default
+        feed, i.e. the "Home" tab. Backs the "home" target (see
+        `fetch_home()`). Named after the GraphQL operation itself, not the
+        target, so it's never ambiguous which one this is.
+        """
         url = f"https://x.com/i/api/graphql/{TWITTER_HOME_TIMELINE_HASH}/HomeTimeline"
         variables = {
             "count": 20,
@@ -337,29 +420,56 @@ class TwitterScraper(BaseScraper):
         }
         return self._fetch_timeline(url, cursor, variables, TWITTER_SEARCH_TIMELINE_FEATURES)
 
-    def execute_action(self, action: str, target: str) -> bool:
+    def execute_action(self, action: str, target: str = None) -> dict:
         """Generic action dispatcher: `action` is one of "like"/"retweet"/
-        "follow"/"mute", `target` is the relevant tweet_id or user_id.
+        "follow"/"mute"/"no_action", `target` is the relevant tweet_id or
+        user_id (unused for "no_action").
 
-        This is the single entry point the future LLM-driven Agent Runtime
-        (roadmap Phase 4) will call with its decision output -- its
+        This is the single entry point the LLM-driven Agent Runtime
+        (roadmap Phase 4) calls with its decision output -- its
         {action, target_object} maps directly onto (action, target) here.
-        Successful follow/mute actions also update local agent state, so
-        callers don't need to do that bookkeeping themselves.
+
+        Returns {"execution_status": "success"|"failure"|"skipped",
+        "system_response": {...} | None} -- the paper's Decision/runtime_log
+        schema fields that only exist once an action has actually been
+        attempted (roadmap Phase 4c), so callers get a structured result
+        instead of a bare bool. Successful follow/mute actions also update
+        local agent state, so callers don't need to do that bookkeeping
+        themselves.
         """
+        if action == "no_action":
+            return {"execution_status": "skipped", "system_response": None}
+
         handler_name = self.ACTION_HANDLERS.get(action)
         if not handler_name:
-            raise ValueError(f"Unknown action: {action!r}. Must be one of {list(self.ACTION_HANDLERS)}.")
+            raise ValueError(
+                f"Unknown action: {action!r}. Must be one of {list(self.ACTION_HANDLERS)} or 'no_action'."
+            )
 
-        success = getattr(self, handler_name)(target)
+        result = getattr(self, handler_name)(target)
+        success = result.get("success", False)
 
         if success:
             if action == "follow":
                 self.agent_state.mark_followed(target)
             elif action == "mute":
                 self.agent_state.mark_muted(target)
+        else:
+            # Surface failures loudly and with the actual reason (e.g. a
+            # GraphQL "this request looks like it might be automated"
+            # rejection, a 404, a rate limit) -- a bare status/reason line
+            # from the handler's own request log is easy to miss among the
+            # rest of the run's output, and callers must not assume an
+            # attempted action actually happened.
+            self._log(
+                f"[action] {action} on {target!r} FAILED: {result.get('reason', 'unknown reason')} "
+                f"(status_code={result.get('status_code')})"
+            )
 
-        return success
+        return {
+            "execution_status": "success" if success else "failure",
+            "system_response": {k: v for k, v in result.items() if k != "success"},
+        }
 
     def _txid(self, method: str, path: str) -> str:
         return self.ct.generate(method, path)
@@ -379,51 +489,59 @@ class TwitterScraper(BaseScraper):
             self._log(f"Reset time (UTC): {reset_dt.strftime('%Y-%m-%d %H:%M:%S')}")
         return True
 
-    def favorite_tweet(self, tweet_id: str) -> bool:
-        path = "/i/api/graphql/lI07N6Otwv1PhnEgXILM7A/FavoriteTweet"
+    def _post_graphql_mutation(self, path: str, query_id: str, variables: dict) -> dict:
+        """POST a GraphQL mutation and determine success from the response
+        *body*, not just the HTTP status code.
+
+        X's GraphQL endpoints routinely return HTTP 200 with an `errors`
+        array and null `data` when the mutation itself fails (stale query
+        hash, already-performed action, tweet deleted, etc.) -- a 200
+        status alone is not proof the action happened. Also surfaces the
+        actual error message in the returned `reason` so a failure like
+        this is diagnosable straight from `runtime_log.jsonl` instead of
+        requiring a live repro.
+        """
         r = self.client.post(
             f"https://x.com{path}",
             headers={
                 "x-client-transaction-id": self._txid("POST", path),
                 "content-type": "application/json",
             },
-            content=json.dumps(
-                {
-                    "variables": {"tweet_id": tweet_id},
-                    "queryId": "lI07N6Otwv1PhnEgXILM7A",
-                }
-            ),
+            content=json.dumps({"variables": variables, "queryId": query_id}),
         )
         self._log(f"{r.status_code} {r.reason_phrase}")
         if self._handle_rate_limit(r):
-            return False
+            return {"success": False, "status_code": r.status_code, "reason": "rate_limited"}
         if r.status_code != 200:
             self._log(f"response: {r.text[:500]}")
-        return r.status_code == 200
+            return {"success": False, "status_code": r.status_code, "reason": r.reason_phrase}
 
-    def retweet(self, tweet_id: str) -> bool:
-        path = "/i/api/graphql/mbRO74GrOvSfRcJnlMapnQ/CreateRetweet"
-        r = self.client.post(
-            f"https://x.com{path}",
-            headers={
-                "x-client-transaction-id": self._txid("POST", path),
-                "content-type": "application/json",
-            },
-            content=json.dumps(
-                {
-                    "variables": {"tweet_id": tweet_id},
-                    "queryId": "mbRO74GrOvSfRcJnlMapnQ",
-                }
-            ),
+        try:
+            body = r.json()
+        except ValueError:
+            body = None
+        errors = body.get("errors") if isinstance(body, dict) else None
+        if errors:
+            message = errors[0].get("message", "graphql_error")
+            self._log(f"GraphQL mutation returned 200 but reported errors: {errors}")
+            return {"success": False, "status_code": r.status_code, "reason": message}
+        return {"success": True, "status_code": r.status_code, "reason": r.reason_phrase}
+
+    def favorite_tweet(self, tweet_id: str) -> dict:
+        return self._post_graphql_mutation(
+            "/i/api/graphql/lI07N6Otwv1PhnEgXILM7A/FavoriteTweet",
+            "lI07N6Otwv1PhnEgXILM7A",
+            {"tweet_id": tweet_id},
         )
-        self._log(f"{r.status_code} {r.reason_phrase}")
-        if self._handle_rate_limit(r):
-            return False
-        if r.status_code != 200:
-            self._log(f"response: {r.text[:500]}")
-        return r.status_code == 200
 
-    def mute_user(self, user_id: str) -> bool:
+    def retweet(self, tweet_id: str) -> dict:
+        return self._post_graphql_mutation(
+            "/i/api/graphql/mbRO74GrOvSfRcJnlMapnQ/CreateRetweet",
+            "mbRO74GrOvSfRcJnlMapnQ",
+            {"tweet_id": tweet_id, "dark_request": False},
+        )
+
+    def mute_user(self, user_id: str) -> dict:
         path = "/i/api/1.1/mutes/users/create.json"
         r = self.client.post(
             f"https://x.com{path}",
@@ -435,12 +553,12 @@ class TwitterScraper(BaseScraper):
         )
         self._log(f"{r.status_code} {r.reason_phrase}")
         if self._handle_rate_limit(r):
-            return False
+            return {"success": False, "status_code": r.status_code, "reason": "rate_limited"}
         if r.status_code != 200:
             self._log(f"response: {r.text[:500]}")
-        return r.status_code == 200
+        return {"success": r.status_code == 200, "status_code": r.status_code, "reason": r.reason_phrase}
 
-    def follow_user(self, user_id: str) -> bool:
+    def follow_user(self, user_id: str) -> dict:
         path = "/i/api/1.1/friendships/create.json"
         body = (
             "include_profile_interstitial_type=1&include_blocking=1&include_blocked_by=1"
@@ -459,11 +577,11 @@ class TwitterScraper(BaseScraper):
         )
         self._log(f"{r.status_code} {r.reason_phrase}")
         if self._handle_rate_limit(r):
-            return False
+            return {"success": False, "status_code": r.status_code, "reason": "rate_limited"}
         if r.status_code != 200:
             self._log(f"response: {r.text[:500]}")
-            return False
-        return True
+            return {"success": False, "status_code": r.status_code, "reason": r.reason_phrase}
+        return {"success": True, "status_code": r.status_code, "reason": r.reason_phrase}
 
     def follow_all(self):
         list_path = self.account.get_account_list_path("follow_list")
@@ -476,18 +594,457 @@ class TwitterScraper(BaseScraper):
                 self._log(f"Already following {user_id} ({entry.get('_comment', '')}); skipping.")
                 continue
             self._log(f"Following user {user_id} ({entry.get('_comment', '')})...")
-            if not self.execute_action("follow", user_id):
+            result = self.execute_action("follow", user_id)
+            if result["execution_status"] != "success":
                 break
             time.sleep(5)
+
+    def run_cold_start(self):
+        """Cold-start initialization (roadmap Phase 4a): before entering
+        normal observation, follow/engage with content sampled from the
+        configured `sockpuppet_config.account_lists` until the
+        `initialization_params` stopping criteria are met (or
+        `max_initialization_days` elapses), so the platform's recommendation
+        system has behavioral signal to personalize against.
+
+        Runs the same restricted action set the paper specifies for this
+        phase (follow/like/repost, no mute/unmute). Engagement candidates are
+        drawn from this account's own Home feed (GraphQL HomeTimeline)
+        rather than a dedicated per-account-list tweet fetch, since no such
+        endpoint is implemented yet -- see ROADMAP.md Phase 4a note.
+
+        No-op if this account has no `initialization_params` configured, or
+        if a prior run already completed initialization (persisted in
+        agent_state).
+        """
+        account = self.account
+        params = account.initialization_params
+        if not params:
+            return
+        if self.agent_state.is_initialization_complete():
+            self._log("Cold-start initialization already complete; skipping.")
+            return
+
+        min_follows = params["min_follows"]
+        min_engagements = params["min_engagements"]
+        max_days = params["max_initialization_days"]
+        self._log(
+            f"Starting cold-start initialization: min_follows={min_follows}, "
+            f"min_engagements={min_engagements}, max_initialization_days={max_days}"
+        )
+
+        deadline = time.time() + max_days * 86400
+        candidates = self._load_cold_start_candidates()
+        candidate_idx = 0
+        engagement_queue = []
+
+        def follows_done():
+            return len(self.agent_state.following_list)
+
+        def engagements_done():
+            return self.agent_state.count_interactions(phase="initialization", actions=("like", "retweet"))
+
+        while follows_done() < min_follows or engagements_done() < min_engagements:
+            if time.time() >= deadline:
+                self._log(
+                    f"[cold-start] max_initialization_days ({max_days}) elapsed with "
+                    f"follows={follows_done()}/{min_follows}, engagements={engagements_done()}/{min_engagements}; "
+                    f"stopping without meeting all criteria."
+                )
+                break
+
+            if follows_done() < min_follows and candidate_idx < len(candidates):
+                user_id = candidates[candidate_idx]
+                candidate_idx += 1
+                if self.agent_state.is_following(user_id):
+                    continue
+                self._log(f"[cold-start] Following {user_id} ({follows_done()}/{min_follows})")
+                result = self._throttled_follow(user_id)
+                if result["execution_status"] == "success":
+                    self.agent_state.record_interaction(
+                        "follow", user_id, phase="initialization",
+                        execution_status=result["execution_status"],
+                        system_response=result["system_response"],
+                    )
+                continue
+
+            if engagements_done() < min_engagements:
+                if not engagement_queue:
+                    engagement_queue = self._next_cold_start_engagement_candidates()
+                    if not engagement_queue:
+                        self._log("[cold-start] No engagement candidates available right now; waiting.")
+                        time.sleep(account.scroll_delay)
+                        continue
+                tweet = engagement_queue.pop(0)
+                tweet_id = tweet.get("tweet_id")
+                if not tweet_id:
+                    continue
+                action = random.choice(["like", "retweet"])
+                self._log(f"[cold-start] {action}-ing tweet {tweet_id} ({engagements_done()}/{min_engagements})")
+                result = self.execute_action(action, tweet_id)
+                if result["execution_status"] == "success":
+                    self.agent_state.record_interaction(
+                        action, tweet_id, phase="initialization",
+                        execution_status=result["execution_status"],
+                        system_response=result["system_response"],
+                    )
+                time.sleep(account.scroll_delay)
+                continue
+
+            # Engagements are satisfied but follows aren't, and we've run out
+            # of follow candidates -- nothing left to do before the deadline.
+            self._log(
+                f"[cold-start] Ran out of follow candidates with follows={follows_done()}/{min_follows} "
+                f"unmet; stopping without meeting all criteria."
+            )
+            break
+
+        self.agent_state.mark_initialization_complete()
+        self._log(
+            f"[cold-start] Initialization complete: follows={follows_done()}/{min_follows}, "
+            f"engagements={engagements_done()}/{min_engagements}"
+        )
+
+    def _load_cold_start_candidates(self):
+        """Flattens and dedupes user_ids from every account list named in
+        `sockpuppet_config.account_lists`, shuffled so candidates aren't
+        always drawn in file order.
+        """
+        user_ids = []
+        seen = set()
+        for list_name in self.account.cold_start_account_lists:
+            path = self.account.get_account_list_path(list_name)
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for entry in data.get("users", []):
+                user_id = entry.get("user_id")
+                if user_id and user_id not in seen:
+                    seen.add(user_id)
+                    user_ids.append(user_id)
+        random.shuffle(user_ids)
+        return user_ids
+
+    def _throttled_follow(self, user_id) -> dict:
+        """Self-throttles to stay under FOLLOW_RATE_LIMIT per
+        FOLLOW_RATE_WINDOW_SECONDS, sleeping ahead of a 429 instead of
+        reacting to one. Returns execute_action()'s structured result.
+        """
+        now = time.time()
+        timestamps = [t for t in getattr(self, "_follow_timestamps", []) if now - t < FOLLOW_RATE_WINDOW_SECONDS]
+        if len(timestamps) >= FOLLOW_RATE_LIMIT:
+            wait = FOLLOW_RATE_WINDOW_SECONDS - (now - timestamps[0]) + 1
+            self._log(f"[cold-start] Follow rate limit reached; sleeping {wait:.0f}s.")
+            time.sleep(wait)
+            now = time.time()
+            timestamps = [t for t in timestamps if now - t < FOLLOW_RATE_WINDOW_SECONDS]
+
+        result = self.execute_action("follow", user_id)
+        timestamps.append(time.time())
+        self._follow_timestamps = timestamps
+        return result
+
+    def _next_cold_start_engagement_candidates(self):
+        """Pulls one page of the Home feed (GraphQL HomeTimeline) to use as
+        engagement targets.
+
+        Not scoped to the configured account_lists specifically (that would
+        need a per-account tweet-fetch endpoint this codebase doesn't have
+        captured yet) -- see ROADMAP.md Phase 4a note.
+        """
+        try:
+            data = self.fetch_home_timeline(None)
+            tweets, _ = parse_timeline(data, HOME_TIMELINE_PATH)
+            return tweets
+        except FetchFailedError as e:
+            self._log(f"[cold-start] Failed to fetch engagement candidates: {e}")
+            return []
+
+    def observe(self) -> dict:
+        """Observation stage (roadmap Phase 4, paper section 3.3 stage 1):
+        fetches ONE page of every configured `data_collection.targets` right
+        now, rather than the old continuous per-target scrape loop
+        (_scrape_timeline) used outside Agent Runtime mode. This is what
+        makes simultaneous multi-target observation possible -- each
+        activation gets a snapshot of every target, not an indefinite scroll
+        through one.
+
+        Returns platform_state: {target_name: [tweet, ...]}.
+        """
+        raw_fetchers = {
+            "home": (self.fetch_home_timeline, HOME_TIMELINE_PATH),
+            "following": (self.fetch_home_latest_timeline, HOME_TIMELINE_PATH),
+            "search": (self.fetch_search_latest, SEARCH_TIMELINE_PATH),
+        }
+        platform_state = {}
+        for target in self.account.targets:
+            fetch_fn, timeline_path = raw_fetchers[target]
+            result = self._fetch_and_parse_with_retry(fetch_fn, None, timeline_path)
+            platform_state[target] = result[0] if result else []
+        return platform_state
+
+    def _allowed_actions_for_phase(self, phase: str) -> list:
+        """Restricted action set per experiment phase (paper section 3.2):
+        cold-start/initialization excludes mute/unmute; pre/post-treatment
+        allow the full implemented set. `no_action` is always available.
+        """
+        if phase == "initialization":
+            return ["follow", "like", "retweet", "no_action"]
+        return ["follow", "like", "retweet", "mute", "no_action"]
+
+    def _build_experiment_context(self) -> dict:
+        """experiment_context (paper section 3.3): experiment_id/phase/
+        treatment_arm/intervention_status are stand-ins here -- Account
+        exposes them from `sockpuppet_config`/`experiment_design` config for
+        now, superseded by the Experiment Orchestrator's real per-agent
+        state once it exists (roadmap Phase 5).
+        """
+        account = self.account
+        return {
+            "experiment_id": account.experiment_id,
+            "phase": account.experiment_phase,
+            "treatment_arm": account.treatment_arm,
+            "intervention_status": "none",
+            "current_time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+
+    def _resolve_target(self, action: str, tweet: dict) -> Optional[str]:
+        """Deterministically derives target_object from the single tweet a
+        per-post decision concerns (roadmap Phase 4, per-post redesign) --
+        the model is never asked to supply this itself, so there's no id for
+        it to hallucinate or confuse (a real bug in the old whole-batch
+        design, see ROADMAP.md's Phase 4 follow-ups).
+
+        like/retweet act on the tweet itself; follow/mute act on its author.
+        Can legitimately return None even for a non-"no_action" action if
+        the tweet's own data is missing the needed id (e.g. a malformed
+        upstream API response) -- that's a data-quality problem, not a
+        hallucination, and the caller must treat it as such.
+        """
+        if action in ("like", "retweet"):
+            return tweet.get("tweet_id")
+        if action in ("follow", "mute"):
+            return (tweet.get("author") or {}).get("user_id")
+        return None
+
+    def _validate_decision(self, decision, tweet: dict, allowed_actions: list):
+        """Guards against three ways a structured LLM decision can still be
+        unusable: an action outside what's allowed this phase, a target id
+        that's missing from this tweet's own data (a data-quality problem,
+        not a hallucination -- there's no LLM-supplied id to hallucinate
+        anymore in the per-post design), or a repeat of an (action, target)
+        pair this account already did successfully. Each case is downgraded
+        to a logged no_action rather than passed to execute_action() -- the
+        repeat check in particular exists because telling the model "don't
+        repeat yourself" in the prompt (see YOUR RECENT ACTIONS) is not
+        reliably honored by a small local model; this makes it a hard rule
+        instead of a hint.
+
+        Returns (action, target_object, no_action_reason). no_action_reason
+        is None whenever action isn't "no_action" (there's nothing to
+        explain), and otherwise one of:
+        - "chose": the model was shown this post and genuinely decided
+          no_action was the right call.
+        - "repeat": downgraded because it's an exact repeat of an
+          (action, target) pair that already succeeded before.
+        - "failed": downgraded because the decision itself couldn't be
+          honored -- either the action isn't allowed this phase, or this
+          post's own data is missing the id the chosen action needs.
+        """
+        action = decision.action
+
+        if action not in allowed_actions:
+            self._log(
+                f"[runtime] LLM chose disallowed action {action!r} for this phase "
+                f"(allowed: {allowed_actions}); treating as no_action."
+            )
+            return "no_action", None, "failed"
+
+        if action == "no_action":
+            return "no_action", None, "chose"
+
+        target = self._resolve_target(action, tweet)
+
+        if target is None:
+            self._log(
+                f"[runtime] LLM chose {action} on tweet_id={tweet.get('tweet_id')!r}, but this "
+                f"tweet's own data is missing the id {action} needs; rejecting as no_action "
+                f"rather than acting on incomplete data."
+            )
+            return "no_action", None, "failed"
+
+        if self.agent_state.has_acted_on(action, target):
+            self._log(
+                f"[runtime] LLM chose {action} on target_object={target!r} again, which it already "
+                f"did successfully before; rejecting as no_action instead of repeating a no-op action."
+            )
+            return "no_action", None, "repeat"
+
+        return action, target, None
+
+    def _sample_activation_interval(self) -> float:
+        """Samples the wait until the next decision cycle from
+        `sockpuppet_config.activation_schedule` (paper section 3.3: Runtime
+        Scheduling). A single-account stand-in for the Experiment
+        Orchestrator's real per-agent scheduler (roadmap Phase 5) --
+        `truncated_powerlaw` here is approximated as a log-uniform draw over
+        [min_interval, max_interval] (no shape parameter is specified in the
+        paper's config schema to do otherwise); `uniform` samples evenly.
+        Revisit once Phase 5 formalizes real scheduling.
+        """
+        schedule = self.account.sockpuppet_config.get("activation_schedule") or {}
+        min_interval = parse_duration(schedule.get("min_interval", "15m"))
+        max_interval = parse_duration(schedule.get("max_interval", "6h"))
+        distribution = schedule.get("distribution", "uniform")
+
+        if max_interval <= min_interval:
+            return min_interval
+        if distribution == "truncated_powerlaw":
+            return min_interval * (max_interval / min_interval) ** random.random()
+        return random.uniform(min_interval, max_interval)
+
+    def _log_runtime_cycle(
+        self, observation_id, phase, prompt, decision, action, target,
+        observed_tweet_id, result, target_name=None, no_action_reason=None,
+    ):
+        """Logging stage (roadmap Phase 4, paper section 3.3 stage 5 /
+        section 4 runtime_log schema). `data_collection.logging: minimal`
+        omits the constructed prompt and raw model output (larger, more
+        sensitive) and keeps just the decision/execution trace.
+
+        `observed_tweet_id` records which specific post prompted this row --
+        needed since the per-post redesign (roadmap Phase 4) means
+        `target_object` alone doesn't identify it: it's None for no_action,
+        and it's the *author's* user_id (not the tweet's id) for
+        follow/mute. `target_name` (which feed this post came from) is
+        included when available for the same traceability reason.
+
+        `no_action_reason` (see `_validate_decision`) distinguishes the three
+        ways a row can end up `no_action` -- "chose" (the model genuinely
+        decided not to act), "repeat" (downgraded, exact repeat of a prior
+        success), "failed" (downgraded, disallowed action or missing target
+        data) -- always present when `action == "no_action"`, always None
+        otherwise.
+        """
+        entry = {
+            "observation_id": observation_id,
+            "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "phase": phase,
+            "observed_tweet_id": observed_tweet_id,
+            "target_name": target_name,
+            "selected_action": action,
+            "target_object": target,
+            "no_action_reason": no_action_reason,
+            "execution_status": result["execution_status"],
+            "system_response": result["system_response"],
+        }
+        if self.account.logging_level != "minimal":
+            entry["constructed_prompt"] = prompt
+            entry["model_output"] = decision.model_dump() if decision is not None else None
+        self.runtime_file_manager.save_data(entry)
+
+    def run_agent_runtime(self):
+        """The Agent Runtime's five-stage decision cycle (roadmap Phase 4,
+        paper section 3.3): Observation -> Prompt Construction -> Decision
+        -> Execution -> Logging, repeated at activation intervals sampled
+        from `sockpuppet_config.activation_schedule`.
+
+        Per-post redesign (roadmap Phase 4, 2026-08-18): one activation
+        still means one `observe()` snapshot, but within that snapshot every
+        individual post gets its OWN Prompt Construction -> Decision ->
+        Execution -> Logging pass, rather than one prompt/decision for the
+        whole batch. This matches the paper's own worked example ("for each
+        X item in the feed, decide whether or not to engage") and avoids
+        overwhelming the model with dozens of competing candidates in one
+        prompt -- live testing found the old whole-batch design made the
+        model default to `like` almost every cycle instead of reasoning
+        through compound persona triggers. `activation_schedule` still
+        governs the interval BETWEEN activations (platform visits), not
+        between individual post evaluations within one activation.
+
+        Runs forever (each account already gets its own thread -- see
+        main.py). This is a single-account stand-in for the real per-agent
+        activation scheduler the Experiment Orchestrator (roadmap Phase 5)
+        will own, same as Phase 3's one-thread-per-account was for
+        multi-account concurrency.
+        """
+        account = self.account
+        self._log("Starting Agent Runtime decision loop.")
+        persona_prompt = account.get_persona_prompt_text()
+        engine = DecisionEngine()
+
+        while True:
+            phase = account.experiment_phase
+            allowed_actions = self._allowed_actions_for_phase(phase)
+
+            platform_state = self.observe()
+            observation_id = str(uuid.uuid4())
+            self.file_manager.save_data({"observation_id": observation_id, "platform_state": platform_state})
+
+            total_posts = sum(len(tweets) for tweets in platform_state.values())
+            if total_posts == 0:
+                # Nothing observed this activation -- still write one row so
+                # the runtime_log's audit trail (paper: Experiment
+                # Orchestrator responsibility #7, reproducibility logging)
+                # shows the activation happened rather than looking
+                # indistinguishable from a skipped/crashed one.
+                self._log("[runtime] Nothing observed this activation.")
+                result = self.execute_action("no_action", None)
+                self.agent_state.record_interaction(
+                    "no_action", None, phase=phase,
+                    execution_status=result["execution_status"],
+                    system_response=result["system_response"],
+                )
+                self._log_runtime_cycle(
+                    observation_id, phase, None, None, "no_action", None, None, result,
+                    no_action_reason="nothing_observed",
+                )
+            else:
+                for target_name, tweets in platform_state.items():
+                    for tweet in tweets:
+                        experiment_context = self._build_experiment_context()
+                        recent_interactions = self.agent_state.recent_interactions(
+                            limit=RECENT_INTERACTIONS_WINDOW, exclude_actions=("no_action",)
+                        )
+                        prompt = construct_prompt(
+                            persona_prompt, tweet, target_name, experiment_context,
+                            allowed_actions, recent_interactions,
+                        )
+
+                        decision = engine.decide(prompt)
+                        action, target, no_action_reason = self._validate_decision(decision, tweet, allowed_actions)
+
+                        self._log(
+                            f"[runtime] Decision on tweet_id={tweet.get('tweet_id')}: "
+                            f"action={action}, target_object={target}"
+                            + (f", no_action_reason={no_action_reason}" if no_action_reason else "")
+                        )
+                        result = self.execute_action(action, target)
+
+                        self.agent_state.record_interaction(
+                            action, target, phase=phase,
+                            execution_status=result["execution_status"],
+                            system_response=result["system_response"],
+                        )
+                        self._log_runtime_cycle(
+                            observation_id, phase, prompt, decision, action, target,
+                            tweet.get("tweet_id"), result, target_name=target_name,
+                            no_action_reason=no_action_reason,
+                        )
+
+            interval = self._sample_activation_interval()
+            self._log(f"[runtime] Next activation in {interval:.0f}s.")
+            time.sleep(interval)
 
 
 def parse_timeline(data, timeline_path):
     """Parses a timeline response into (tweets, next_cursor).
 
     `timeline_path` is the sequence of keys under `data[...]` that leads to
-    the `instructions` list -- e.g. HOME_TIMELINE_PATH for Home/Follows,
-    SEARCH_TIMELINE_PATH for Search (see path constants near the top of this
-    file). The entries within `instructions` follow the same tweet-*/
+    the `instructions` list -- e.g. HOME_TIMELINE_PATH for Home/Following
+    (GraphQL HomeTimeline/HomeLatestTimeline both share this path -- see the
+    naming key near the top of this file), SEARCH_TIMELINE_PATH for Search
+    (see path constants near the top of this file). The entries within
+    `instructions` follow the same tweet-*/
     cursor-bottom-* shape across all three endpoints, so only the path to
     reach them differs.
     """
