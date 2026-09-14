@@ -27,23 +27,38 @@ platform: twitter
 # a single "mode" controlled both what was scraped AND whether follow_all()
 # ran; now they're independent.
 #
-# NOTE: exactly one target is supported outside Agent Runtime mode (see
-# `sockpuppet_config.persona_prompt` below) -- the old scripted path is
-# still a single-threaded process that scrapes one timeline continuously.
-# Agent Runtime mode observes a snapshot of every listed target each
-# activation, so multiple entries are fine there (roadmap Phase 4).
+# `targets` also accepts the paper's two derived DATA STREAMS, which aren't
+# feeds to observe but extra JSONL output written as the account acts:
+#   engagement_log       - every action this account performs (paper section
+#                          4's "Engagement History"), whatever triggered it:
+#                          cold-start, follow_all, an Agent Runtime decision,
+#                          or an orchestrator intervention.
+#   intervention_history - what the orchestrator's intervention did to this
+#                          account and which accounts it affected.
+#
+# Multiple observation targets are supported in both modes: Agent Runtime
+# observes a snapshot of every listed target each activation, and the old
+# scripted path round-robins a few pages per target per rotation.
 data_collection:
   targets:
     - home
+    # - following
+    # - engagement_log
+    # - intervention_history
 
   # Query text for the "search" target above (X's "All of these words"
   # search — plain keywords, no special query-operator handling yet).
   # Only read when "search" is one of the targets.
   search_query: trump
 
-  # "full" (default) logs the constructed prompt + raw model output in the
-  # Agent Runtime's runtime_log JSONL; "minimal" logs just the decision/
-  # execution trace. Only meaningful in Agent Runtime mode.
+  # How often platform state is observed. `every_visit` (the default, and
+  # the paper's own value) means one observation per activation, which is
+  # what the runtime does; no other frequency is implemented.
+  # observation_frequency: every_visit
+
+  # "full" (default) logs the constructed prompt, raw model output, and the
+  # observed post in the Agent Runtime's runtime_log JSONL; "minimal" logs
+  # just the decision/execution trace. Only meaningful in Agent Runtime mode.
   # logging: full
 
 # actions: non-LLM scripted actions to run once at startup, before
@@ -96,6 +111,7 @@ timezone: America/New_York
 # a given name.
 account_lists:
   follow_list: follow_user_ids.json
+  untrustworthy_sources: untrustworthy_sources.json
 
 # sockpuppet_config.initialization_params: cold-start initialization
 # (roadmap Phase 4a). When set (here or per-account) and this account's
@@ -138,6 +154,29 @@ account_lists:
 # Commented out by default: this makes real LLM calls and real
 # follow/like/repost/mute actions against the live account.
 #
+# phase/treatment_arm below are a static stand-in, used only when this
+# account has no experiment_design.treatment_arms configured (see below) --
+# an orchestrated account's real phase/treatment_arm come from the shared
+# Experiment Orchestrator (roadmap Phase 5) instead, and these two keys are
+# ignored for it.
+#
+# sockpuppet_config.action_rate_limits: per-action pacing, applied on top of
+# whatever the platform itself enforces. An action with no entry is uncapped.
+# `max_per_hour` is a rolling-hour cap; `min_interval` additionally forbids
+# two of that action closer together than the given duration (both matter --
+# an hourly cap alone still permits a burst of several within a minute).
+#
+# When a budget has no slot free the decision is downgraded to a logged
+# no_action with `no_action_reason: "rate_capped"` -- it never blocks the
+# activation, so the agent keeps evaluating the rest of the feed.
+#
+# The retweet values below are sized from live observation, NOT a documented
+# platform limit: on 2026-09-09 only 35% of retweet attempts succeeded, with
+# a mix of misleading refusals (404 / "looks automated" / a "daily limit"
+# message that was demonstrably false). ~6 successes/hour was sustained, so
+# 4/hour with an 8m floor sits conservatively inside that. See ROADMAP.md's
+# retweet-reliability entry before changing these.
+#
 # sockpuppet_config:
 #   persona_prompt: personas/example_persona.txt
 #   phase: pre_treatment
@@ -146,12 +185,114 @@ account_lists:
 #     distribution: truncated_powerlaw
 #     min_interval: 15m
 #     max_interval: 6h
+#   action_rate_limits:
+#     retweet:
+#       max_per_hour: 4
+#       min_interval: 8m
 
 # experiment_design.experiment_name: used to build a readable experiment_id
 # (`<experiment_name>::<account_name>`) in the Agent Runtime's
-# experiment_context. The paper's other experiment_design fields
-# (treatment_arms, randomization, phase_durations) belong to the Experiment
-# Orchestrator (roadmap Phase 5) and aren't read by anything yet.
+# experiment_context.
+#
+# experiment_design.treatment_arms: setting this is what opts an account
+# INTO the shared Experiment Orchestrator (roadmap Phase 5) -- every account
+# that sets it must agree on experiment_name/randomization/phase_durations
+# (validated at startup), since those are experiment-wide, not per-account.
+# Omitting treatment_arms (the default) means an account is entirely
+# unaffected by orchestration -- it keeps using the static
+# sockpuppet_config.phase/treatment_arm above instead.
+#
+# experiment_design.randomization.method: assignment procedure. Only
+# `simple_random` is implemented (the paper names stratified and blocked
+# randomization as future extensions); anything else is rejected at startup
+# rather than silently treated as simple random.
+#
+# experiment_design.randomization.seed: makes the treatment-arm split
+# reproducible. Assignment happens at the END of the pre-treatment phase --
+# not at startup -- matching the paper ("At the conclusion of the
+# pre-treatment period, the orchestrator assigns each sockpuppet to an
+# experimental condition"), so agents run a condition-blind baseline first.
+# It's then persisted, so a later seed change never silently reassigns an
+# already-committed experiment. ratios must sum to 1.0 across every arm
+# (omit ratios for an even split).
+#
+# experiment_design.recovery_policy: how an orchestrated account recovers
+# from a failed activation (paper section 3.4 responsibility #6). Defaults
+# to {max_consecutive_failures: 5, backoff: 1m, max_backoff: 30m} -- the
+# agent waits `backoff` doubled per consecutive failure (capped at
+# max_backoff) and gives up after max_consecutive_failures, without
+# affecting any other account's schedule.
+#
+# experiment_design.phase_durations: per phase, driving automatic
+# transitions through the fixed sequence pre_treatment -> treatment ->
+# post_treatment. A phase with no entry here never auto-transitions -- the
+# experiment just stays there. Each entry is either:
+#   - a bare shorthand duration (e.g. "3d", "6h") -- transitions once that
+#     much wall-clock time has elapsed since the phase began, or
+#   - {max_duration: ..., max_action_count: ...} -- transitions once EITHER
+#     condition is met, whichever comes first. max_action_count counts real,
+#     agent-selected actions (like/retweet/follow/mute -- not no_action) by
+#     any ONE participating account during this phase; at least one of the
+#     two keys must be set.
+# Whatever ends a phase, the orchestrator will never actually leave it while
+# an intervention triggered by it is still pending/running for any
+# participating account -- a long target list, transient failures, or rate
+# limits extend how long a phase takes rather than causing a mute (or other
+# intervention action) to be skipped.
+#
+# Reaching the end of the LAST phase (post_treatment) completes the
+# experiment: experiment_status flips to "completed", a termination event is
+# logged, and every account stops acting and exits so the process shuts down
+# cleanly instead of running on past the end of the experiment.
 #
 # experiment_design:
 #   experiment_name: mercury_muting
+#   treatment_arms:
+#     - control
+#     - treatment
+#   randomization:
+#     method: simple_random
+#     seed: 42
+#     ratios:
+#       control: 0.5
+#       treatment: 0.5
+#   recovery_policy:
+#     max_consecutive_failures: 5
+#     backoff: 1m
+#     max_backoff: 30m
+#   phase_durations:
+#     initialization: adaptive   # ends on sockpuppet_config.initialization_params, not a clock
+#     pre_treatment: 3d
+#     treatment:                        # example of the dict form: whichever comes first
+#       max_duration: 7d
+#       max_action_count: 10000
+#     post_treatment: 3d   # omit to run indefinitely with no further auto-transition
+
+# intervention: top-level namespace, sibling to experiment_design/
+# sockpuppet_config/data_collection (paper section 3.1) -- only read for
+# accounts with experiment_design.treatment_arms set above. Fires exactly
+# once, at `execution_time`, for every account whose treatment arm is in
+# `applies_to_arms`: samples per `selection_rule` from `target_accounts`
+# (a name from account_lists below) and runs `action` against each sampled
+# user_id via that account's own scraper -- reusing the same dispatcher the
+# Agent Runtime and cold-start already use, not a separate action path.
+# Every target gets a real attempt, retried with backoff, and the phase
+# won't advance until the whole intervention has finished.
+#
+#   action         - any execute_action() action, e.g. mute / follow
+#   target_accounts- an account_lists name holding the candidate accounts
+#   selection_rule - `all`, or `randomNN` for a random NN% sampled
+#                    independently per sockpuppet (e.g. random70)
+#   execution_time - end_of_pre_treatment (fires as `treatment` begins) or
+#                    end_of_treatment (fires as `post_treatment` begins)
+#   applies_to_arms- which treatment_arms values receive it; this is the
+#                    explicit form of the paper's "treatment agents receive
+#                    the configured intervention, control agents receive none"
+#
+# intervention:
+#   action: mute
+#   target_accounts: untrustworthy_sources
+#   selection_rule: random70
+#   execution_time: end_of_pre_treatment
+#   applies_to_arms:
+#     - treatment

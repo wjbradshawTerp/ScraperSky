@@ -1,5 +1,13 @@
 .env
 accounts.yaml
+
+# Real account lists that name specific third-party accounts. The
+# untrustworthy_sources list labels named real accounts as "untrustworthy",
+# so the real ids stay local; untrustworthy_sources.json.example documents
+# the shape. (follow_user_ids.json is committed -- it's just a follow list,
+# it makes no claim about the accounts in it.)
+untrustworthy_sources.json
+
 data/*
 !data/.gitkeep
 logs/

@@ -3,9 +3,12 @@ import threading
 
 import httpx
 
-from config import settings
+from config import settings, DATA_STREAM_TARGETS
 from scraper import SCRAPER_REGISTRY
 from runtime.decision import DEFAULT_BASE_URL
+from orchestrator import spec
+from orchestrator.orchestrator import ExperimentOrchestrator
+from utils.rate_budget import build_budgets
 
 # "home" = X's algorithmic default feed (GraphQL HomeTimeline, the "Home"
 # tab); "following" = X's reverse-chronological feed (GraphQL
@@ -13,28 +16,62 @@ from runtime.decision import DEFAULT_BASE_URL
 # of src/scraper/twitter.py.
 VALID_TARGETS = {"home", "following", "search"}
 
+# paper section 3.1: `observation_frequency: every_visit`. One observation
+# per activation is what the runtime does; nothing else is implemented.
+SUPPORTED_OBSERVATION_FREQUENCIES = ("every_visit",)
+
+# Actions a `sockpuppet_config.action_rate_limits` entry may pace -- the
+# same set execute_action() can dispatch (no_action needs no budget).
+VALID_RATE_LIMITED_ACTIONS = {"like", "retweet", "follow", "mute"}
+
 # Documented live-platform follow limit (see ROADMAP.md's rate-limit note) --
 # used to reject an infeasible cold-start config at startup rather than
 # letting it silently stall for days.
 FOLLOWS_PER_DAY = 400
 
 
-def validate_targets(targets, agent_runtime_enabled):
+def validate_targets(targets):
+    """`targets` here is the observation targets only -- Account already
+    split out the paper's derived data streams (engagement_log,
+    intervention_history), which aren't feeds to observe.
+    """
     invalid = [t for t in targets if t not in VALID_TARGETS]
     if invalid:
         raise ValueError(
-            f"Invalid data_collection target(s): {invalid}. Must be one of {VALID_TARGETS}."
+            f"Invalid data_collection target(s): {invalid}. Must be one of "
+            f"{sorted(VALID_TARGETS)} (observation feeds) or {list(DATA_STREAM_TARGETS)} "
+            f"(derived data streams)."
         )
     if not targets:
-        raise ValueError("At least one data_collection target is required.")
-    # Outside Agent Runtime mode the scraper is still a single-threaded
-    # process that observes one timeline continuously. Agent Runtime mode
-    # (roadmap Phase 4) observes a snapshot of every configured target each
-    # activation, so multiple targets are fine there.
-    if not agent_runtime_enabled and len(targets) != 1:
+        raise ValueError("At least one observable data_collection target is required.")
+
+
+def validate_action_rate_limits(account):
+    """Parses `sockpuppet_config.action_rate_limits` so a malformed entry
+    (or an action name nothing can execute) fails at startup rather than
+    mid-run. No-op when none are configured.
+    """
+    limits = account.action_rate_limits
+    if not limits:
+        return
+    unknown = [a for a in limits if a not in VALID_RATE_LIMITED_ACTIONS]
+    if unknown:
         raise ValueError(
-            f"Exactly one data_collection target is supported outside Agent Runtime mode "
-            f"(no sockpuppet_config.persona_prompt configured); got {targets!r}."
+            f"Account '{account.name}': action_rate_limits names action(s) {unknown} that "
+            f"can't be executed; expected any of {sorted(VALID_RATE_LIMITED_ACTIONS)}."
+        )
+    try:
+        build_budgets(limits)
+    except ValueError as e:
+        raise ValueError(f"Account '{account.name}': {e}") from e
+
+
+def validate_observation_frequency(account):
+    if account.observation_frequency not in SUPPORTED_OBSERVATION_FREQUENCIES:
+        raise ValueError(
+            f"Account '{account.name}': unsupported data_collection.observation_frequency "
+            f"{account.observation_frequency!r}; this framework implements "
+            f"{list(SUPPORTED_OBSERVATION_FREQUENCIES)} (one observation per activation)."
         )
 
 
@@ -92,6 +129,80 @@ def validate_agent_runtime(account):
     account.get_persona_prompt_text()
 
 
+def validate_intervention(account):
+    """No-op if this account has no `intervention` configured. Otherwise
+    parses it through the paper's published schema (action/target_accounts/
+    selection_rule/execution_time -- see orchestrator/spec.py) and checks
+    that `target_accounts` actually resolves to a real account list, so a
+    bad intervention config fails at startup rather than when it's due to
+    fire mid-experiment.
+    """
+    if not account.intervention:
+        return
+    try:
+        parsed = spec.parse_intervention(account.intervention)
+    except ValueError as e:
+        raise ValueError(f"Account '{account.name}': {e}") from e
+    account.get_account_list_path(parsed["target_accounts"])
+    unknown_arms = [arm for arm in parsed["applies_to_arms"] if arm not in account.treatment_arms]
+    if unknown_arms:
+        raise ValueError(
+            f"Account '{account.name}': intervention.applies_to_arms names arm(s) "
+            f"{unknown_arms} that aren't in experiment_design.treatment_arms "
+            f"({account.treatment_arms})."
+        )
+
+
+def validate_experiment_orchestration(accounts):
+    """Every account with `experiment_design.treatment_arms` configured
+    opts into the shared Experiment Orchestrator (roadmap Phase 5). At
+    most one experiment is supported per process (one accounts.yaml, one
+    orchestrator instance) -- reject a config naming more than one, or
+    where opted-in accounts disagree on the experiment-wide
+    `randomization`/`phase_durations` values (a likely copy-paste mistake,
+    since those apply to the whole experiment, not per-account).
+
+    Returns the list of opted-in accounts (empty if none), so main() can
+    decide whether to construct an orchestrator at all.
+    """
+    experiment_accounts = [a for a in accounts if a.treatment_arms]
+    if not experiment_accounts:
+        return []
+
+    names = {a.experiment_design.get("experiment_name") for a in experiment_accounts}
+    if len(names) > 1:
+        raise ValueError(
+            f"Accounts with treatment_arms configured must share one experiment_design.experiment_name "
+            f"(one Experiment Orchestrator per process); found: {sorted(n for n in names if n)}."
+        )
+
+    # Rejects an unsupported randomization procedure at startup rather than
+    # after the pre-treatment period, when it's far too late to fix.
+    for account in experiment_accounts:
+        try:
+            spec.parse_randomization_method(account.randomization_method)
+        except ValueError as e:
+            raise ValueError(f"Account '{account.name}': {e}") from e
+
+    first = experiment_accounts[0]
+    for account in experiment_accounts[1:]:
+        if account.experiment_design.get("randomization") != first.experiment_design.get("randomization"):
+            raise ValueError(
+                f"Account '{account.name}': experiment_design.randomization must match every other "
+                f"opted-in account's -- it's experiment-wide, not per-account."
+            )
+        if account.experiment_design.get("phase_durations") != first.experiment_design.get("phase_durations"):
+            raise ValueError(
+                f"Account '{account.name}': experiment_design.phase_durations must match every other "
+                f"opted-in account's -- it's experiment-wide, not per-account."
+            )
+
+    for account in experiment_accounts:
+        validate_intervention(account)
+
+    return experiment_accounts
+
+
 def validate_account(account):
     if not account.platform:
         raise ValueError(
@@ -100,7 +211,9 @@ def validate_account(account):
         )
     if account.platform not in SCRAPER_REGISTRY:
         raise ValueError(f"Account '{account.name}': unsupported platform '{account.platform}'.")
-    validate_targets(account.targets, account.agent_runtime_enabled)
+    validate_targets(account.targets)
+    validate_observation_frequency(account)
+    validate_action_rate_limits(account)
     if "search" in account.targets and not account.search_query:
         raise ValueError(
             f"Account '{account.name}': data_collection.search_query is required "
@@ -110,12 +223,14 @@ def validate_account(account):
     validate_agent_runtime(account)
 
 
-def run_account(account):
+def run_account(account, orchestrator=None):
     try:
-        scraper = SCRAPER_REGISTRY[account.platform](account)
+        scraper = SCRAPER_REGISTRY[account.platform](account, orchestrator=orchestrator)
         scraper.run()
-    except Exception:
+    except Exception as e:
         print(f"[{account.name}] Fatal error, this account's scraper has stopped:")
+        if orchestrator is not None:
+            orchestrator.log_failure(account.name, repr(e))
         raise
 
 
@@ -128,15 +243,39 @@ def main():
     # of surfacing only after the others are already mid-run.
     for account in accounts:
         validate_account(account)
+    experiment_accounts = validate_experiment_orchestration(accounts)
 
     # Each account's scraper.run() loops forever observing its own target,
-    # so every account needs its own thread -- this is a stand-in for the
-    # Experiment Orchestrator's per-agent activation scheduler (roadmap
-    # Phase 5), not that scheduler itself.
+    # so every account keeps its own thread -- the ExperimentOrchestrator
+    # (roadmap Phase 5) is a shared coordinator these threads consult, not
+    # a replacement for them. An account with no treatment_arms configured
+    # gets orchestrator=None even when one exists for sibling accounts, so
+    # it's entirely unaffected.
+    orchestrator = None
+    if experiment_accounts:
+        first = experiment_accounts[0]
+        orchestrator = ExperimentOrchestrator(
+            experiment_name=first.experiment_design.get("experiment_name") or "unnamed_experiment",
+            participating_accounts=[a.name for a in experiment_accounts],
+            experiment_design=first.experiment_design,
+            intervention_by_account={a.name: a.intervention for a in experiment_accounts},
+            output_dir=settings.OUTPUT_DIR,
+            timezone=first.timezone,
+            agent_id_by_account={a.name: a.agent_id for a in experiment_accounts},
+            action_rate_limits_by_account={
+                a.name: a.action_rate_limits for a in experiment_accounts
+            },
+        )
+        orchestrator.start()
+        print(
+            f"Experiment Orchestrator started for '{orchestrator.experiment_name}' "
+            f"({len(experiment_accounts)} account(s)): {', '.join(a.name for a in experiment_accounts)}"
+        )
+
     threads = [
         threading.Thread(
             target=run_account,
-            args=(account,),
+            args=(account, orchestrator if account.treatment_arms else None),
             name=account.name,
             daemon=True,
         )
@@ -146,8 +285,22 @@ def main():
     print(f"Starting {len(threads)} account(s): {', '.join(a.name for a in accounts)}")
     for thread in threads:
         thread.start()
+    # Each account thread returns on its own once the experiment completes
+    # (paper section 3.4 responsibility #5: "the experiment terminates after
+    # completion of the post-treatment phase") -- every long-running loop in
+    # the scraper checks orchestrator.should_stop(). So joining here is what
+    # actually shuts the process down cleanly at the end of an experiment,
+    # rather than blocking forever.
     for thread in threads:
         thread.join()
+
+    if orchestrator is not None and orchestrator.should_stop():
+        print(
+            f"Experiment '{orchestrator.experiment_name}' complete "
+            f"(phase: {orchestrator.get_phase()}); all accounts stopped."
+        )
+    else:
+        print("All account threads have stopped.")
 
 
 if __name__ == "__main__":

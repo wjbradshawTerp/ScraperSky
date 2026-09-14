@@ -4,6 +4,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# `data_collection.targets` entries that are derived output streams rather
+# than platform feeds to observe (paper section 4's Data Streams list:
+# "Engagement History", "Intervention History"). See Account.__init__.
+DATA_STREAM_TARGETS = ("engagement_log", "intervention_history")
+
 
 class Account:
     """One sockpuppet account's credentials plus its resolved behavioral
@@ -18,7 +23,7 @@ class Account:
         scroll_delay, fetch_max_retries, fetch_retry_backoff,
         empty_batch_backoff_base, empty_batch_backoff_max, empty_batch_backoff_jitter, timezone,
         data_collection, actions, account_lists, sockpuppet_config,
-        experiment_design, config_dir,
+        experiment_design, intervention, config_dir,
     ):
         self.name = name
         self.auth_token = auth_token
@@ -32,12 +37,23 @@ class Account:
         self.empty_batch_backoff_max = empty_batch_backoff_max
         self.empty_batch_backoff_jitter = empty_batch_backoff_jitter
         self.timezone = timezone
-        self.targets = data_collection.get("targets") or []
+        # `data_collection.targets` mixes two different kinds of thing in
+        # the paper's schema (section 3.1): platform feeds that get
+        # OBSERVED each activation (for_you_feed/home_timeline -> our
+        # home/following, plus search), and derived data STREAMS the
+        # framework writes out (engagement_log, intervention_history).
+        # Only the former are fetched by observe(); splitting them here
+        # keeps that distinction out of every consumer.
+        configured_targets = data_collection.get("targets") or []
+        self.targets = [t for t in configured_targets if t not in DATA_STREAM_TARGETS]
+        self.data_streams = [t for t in configured_targets if t in DATA_STREAM_TARGETS]
         self.search_query = data_collection.get("search_query")
         self.logging_level = data_collection.get("logging", "full")
+        self.observation_frequency = data_collection.get("observation_frequency", "every_visit")
         self.actions = actions
         self.sockpuppet_config = sockpuppet_config
         self.experiment_design = experiment_design
+        self.intervention = intervention
         self._account_lists = account_lists
         self._config_dir = config_dir
 
@@ -76,20 +92,69 @@ class Account:
 
     @property
     def experiment_phase(self) -> str:
-        """Current experiment phase for this account. A stand-in for the
-        real per-agent phase tracking the Experiment Orchestrator (roadmap
-        Phase 5) will own -- same idea as Phase 3's one-thread-per-account
-        being a stand-in for the orchestrator's real scheduler.
+        """Current experiment phase for this account, when NOT opted into
+        the Experiment Orchestrator (roadmap Phase 5) -- i.e. `treatment_arms`
+        below is empty. An account with `treatment_arms` set gets its phase
+        from the shared ExperimentOrchestrator instead (real state machine,
+        not this static config read) -- see TwitterScraper._build_experiment_context.
         """
         return self.sockpuppet_config.get("phase", "pre_treatment")
 
     @property
     def treatment_arm(self):
-        """Stand-in for the orchestrator's real randomized treatment
-        assignment (roadmap Phase 5) -- None until an experiment_design's
-        randomization procedure exists to assign it.
+        """Static treatment-arm override, when NOT opted into the
+        Experiment Orchestrator (roadmap Phase 5) -- see `experiment_phase`
+        above for the same distinction. An opted-in account's real,
+        randomized assignment comes from the orchestrator instead.
         """
         return self.sockpuppet_config.get("treatment_arm")
+
+    @property
+    def agent_id(self) -> str:
+        """Stable identifier for this sockpuppet within an experiment (paper
+        section 3.4, account provisioning: each account is assigned an
+        `agent_id`/`persona_prompt`/`experiment_id`/`initialization_params`).
+        Defaults to the account name -- which is already unique per
+        accounts.yaml -- so an experiment only needs to set this explicitly
+        when its analysis expects some other identifier scheme.
+        """
+        return self.sockpuppet_config.get("agent_id") or self.name
+
+    @property
+    def action_rate_limits(self) -> dict:
+        """Per-action pacing caps, e.g.
+        `{"retweet": {"max_per_hour": 4, "min_interval": "8m"}}`.
+
+        Sized from live observation, not a documented platform limit -- see
+        ROADMAP.md's retweet-reliability entry. An action with no entry here
+        is uncapped (the platform's own limits still apply).
+        """
+        return self.sockpuppet_config.get("action_rate_limits") or {}
+
+    @property
+    def randomization_method(self) -> str:
+        return (self.experiment_design.get("randomization") or {}).get("method")
+
+    @property
+    def recovery_policy(self) -> dict:
+        """Failure-recovery policy (paper section 3.4 responsibility #6:
+        "the orchestrator records the failure and reschedules subsequent
+        activations according to the configured recovery policy"). Empty
+        means the built-in defaults apply -- see
+        ExperimentOrchestrator.record_activation_failure.
+        """
+        return self.experiment_design.get("recovery_policy") or {}
+
+    @property
+    def treatment_arms(self) -> list:
+        """The experiment's configured arms (e.g. ["control", "treatment"]).
+        Setting this is what opts an account INTO the shared Experiment
+        Orchestrator (roadmap Phase 5) -- see main.py's opt-in gate. Empty
+        (the default) means this account is entirely unaffected by any
+        orchestrator that may exist for sibling accounts in the same
+        process.
+        """
+        return self.experiment_design.get("treatment_arms") or []
 
     def get_persona_prompt_text(self) -> str:
         path = self.persona_prompt_path
@@ -144,6 +209,7 @@ class Settings:
         self._default_account_lists = self._config.get("account_lists") or {}
         self._default_sockpuppet_config = self._config.get("sockpuppet_config") or {}
         self._default_experiment_design = self._config.get("experiment_design") or {}
+        self._default_intervention = self._config.get("intervention") or {}
 
     def _load_yaml(self, path):
         if not os.path.exists(path):
@@ -207,6 +273,7 @@ class Settings:
                 account_lists={**self._default_account_lists, **(entry.get("account_lists") or {})},
                 sockpuppet_config={**self._default_sockpuppet_config, **(entry.get("sockpuppet_config") or {})},
                 experiment_design={**self._default_experiment_design, **(entry.get("experiment_design") or {})},
+                intervention={**self._default_intervention, **(entry.get("intervention") or {})},
                 config_dir=config_dir,
             ))
 

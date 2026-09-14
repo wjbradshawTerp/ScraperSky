@@ -1,0 +1,12 @@
+{
+    "_comment": "Candidate accounts for the intervention's `target_accounts` list (see config.yaml's account_lists / intervention sections). Copy to untrustworthy_sources.json and fill in real user_ids -- the real file is gitignored, because it labels specific real accounts as 'untrustworthy' and that claim shouldn't be published in this repo. Same shape as follow_user_ids.json.",
+    "users": [
+        {
+            "user_id": "0000000000000000000",
+            "_comment": "optional note about why this account is on the list"
+        },
+        {
+            "user_id": "0000000000000000001"
+        }
+    ]
+}

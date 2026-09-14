@@ -17,11 +17,11 @@ accounts:
     # fetch_max_retries, fetch_retry_backoff, empty_batch_backoff_base,
     # empty_batch_backoff_max, empty_batch_backoff_jitter, timezone,
     # data_collection, actions, account_lists, sockpuppet_config,
-    # experiment_design. Any key
+    # experiment_design, intervention. Any key
     # an account doesn't set falls back to the matching key in config.yaml
     # (dict-valued keys like data_collection/actions/account_lists/
-    # sockpuppet_config/experiment_design merge shallowly -- e.g. an
-    # account can override just `targets` below and still inherit
+    # sockpuppet_config/experiment_design/intervention merge shallowly --
+    # e.g. an account can override just `targets` below and still inherit
     # `search_query` from config.yaml).
     data_collection:
       targets:
@@ -71,12 +71,18 @@ accounts:
   #
   #   # --- data_collection: what gets observed, and how it's logged ---
   #   data_collection:
-  #     targets:                           # home (X's "Home" tab, GraphQL HomeTimeline) / following (X's "Following" tab, GraphQL HomeLatestTimeline) / search -- exactly one
-  #       - home                            # unless Agent Runtime mode is enabled (persona_prompt set), which allows several
+  #     targets:                           # observation feeds: home (X's "Home" tab, GraphQL HomeTimeline) /
+  #       - home                            # following (X's "Following" tab, GraphQL HomeLatestTimeline) / search.
+  #       - following                       # Several are allowed in both modes: Agent Runtime snapshots each one
+  #                                          # per activation; the scripted path round-robins pages across them.
+  #       - engagement_log                  # derived data stream: every action this account performs
+  #       - intervention_history            # derived data stream: what the intervention did to this account
   #     search_query: trump                 # required if "search" is a target; plain keywords only
+  #     observation_frequency: every_visit  # only every_visit is implemented (one observation per activation)
   #     logging: full                       # full (default) or minimal -- controls whether the Agent
-  #                                          # Runtime's runtime_log JSONL includes the constructed
-  #                                          # prompt + raw model output, or just the decision/execution trace
+  #                                          # Runtime's runtime_log JSONL includes the constructed prompt,
+  #                                          # raw model output, and observed post, or just the
+  #                                          # decision/execution trace
   #
   #   # --- actions: non-LLM scripted actions run once at startup ---
   #   actions:
@@ -97,14 +103,67 @@ accounts:
   #       min_follows: 15                   # stop following once at least this many accounts are followed
   #       min_engagements: 15                # stop liking/reposting once at least this many engagement events are recorded
   #       max_initialization_days: 3         # give up after this many days even if criteria above aren't met
-  #     persona_prompt: personas/example_persona.txt   # path to a persona text file -- enables Agent Runtime mode (roadmap Phase 4) when set
-  #     phase: pre_treatment                # initialization / pre_treatment / post_treatment -- stand-in for the Experiment Orchestrator (Phase 5)
-  #     treatment_arm: control              # stand-in for the orchestrator's real randomized treatment assignment (Phase 5)
+  #     persona_prompt: personas/example_persona.txt   # path to a persona text file -- enables Agent Runtime mode (roadmap Phase 4) when set.
+  #                                           # Also makes cold-start persona-driven: initialization runs the same
+  #                                           # decision cycle, restricted to follow/like/repost (no mute).
+  #     agent_id: mercury_p017              # stable id for this sockpuppet in the experiment; defaults to the account name
+  #     phase: pre_treatment                # static stand-in, used ONLY when experiment_design.treatment_arms (below) is NOT set for this account
+  #     treatment_arm: control              # static stand-in, used ONLY when experiment_design.treatment_arms (below) is NOT set for this account
   #     activation_schedule:                 # how long the Agent Runtime waits between decision cycles
-  #       distribution: truncated_powerlaw   # uniform or truncated_powerlaw
+  #       distribution: truncated_powerlaw   # uniform, truncated_powerlaw, or poisson
   #       min_interval: 15m                  # shorthand duration: Ns / Nm / Nh / Nd
   #       max_interval: 6h
+  #     action_rate_limits:                  # per-action pacing on top of the platform's own limits;
+  #       retweet:                           # an action with no entry here is uncapped. A capped
+  #         max_per_hour: 4                  # decision becomes a logged no_action with
+  #         min_interval: 8m                 # no_action_reason "rate_capped" -- it never blocks the
+  #                                           # activation. These retweet values are sized from live
+  #                                           # observation (35% success rate, misleading refusals),
+  #                                           # not a documented limit -- see ROADMAP.md.
   #
-  #   # --- experiment_design: experiment-level metadata ---
+  #   # --- experiment_design: experiment-level metadata + Experiment Orchestrator config (roadmap Phase 5) ---
   #   experiment_design:
   #     experiment_name: mercury_muting      # used to build a readable experiment_id (<experiment_name>::<account_name>)
+  #     treatment_arms:                      # setting this OPTS THIS ACCOUNT INTO the shared Experiment Orchestrator --
+  #       - control                          # every account that sets treatment_arms must agree on experiment_name/
+  #       - treatment                        # randomization/phase_durations (validated at startup); phase/treatment_arm
+  #                                           # above are then ignored in favor of the orchestrator's real state
+  #     randomization:
+  #       method: simple_random              # only simple_random is implemented (stratified/blocked are future work)
+  #       seed: 42                           # makes the treatment-arm split reproducible. Assignment happens at the END
+  #                                           # of pre_treatment (not startup), then persisted -- so agents run a
+  #                                           # condition-blind baseline first, and a later seed change never
+  #                                           # silently reassigns an already-committed experiment
+  #       ratios:                            # must sum to 1.0 across every arm above; omit for an even split
+  #         control: 0.5
+  #         treatment: 0.5
+  #     recovery_policy:                     # how an account recovers from a failed activation
+  #       max_consecutive_failures: 5        # give up on this account after this many in a row (default 5)
+  #       backoff: 1m                        # wait after the first failure, doubled per consecutive failure
+  #       max_backoff: 30m                   # cap on that wait
+  #     phase_durations:                     # driving automatic pre_treatment -> treatment -> post_treatment
+  #       initialization: adaptive           # ends on initialization_params, not a clock (never a fixed duration)
+  #       pre_treatment: 3d                  # transitions; a phase with no entry here never auto-transitions --
+  #       treatment:                         # the experiment just stays there. Each entry is either a bare
+  #         max_duration: 7d                 # shorthand duration (e.g. "3d", as pre_treatment/post_treatment
+  #         max_action_count: 10000          # show), or {max_duration, max_action_count} to transition on
+  #       post_treatment: 3d                 # whichever comes first -- max_action_count counts real, agent-
+  #                                           # selected actions (not no_action) by any ONE participating account.
+  #                                           # Whatever ends a phase, the orchestrator will never actually leave
+  #                                           # it while an intervention it triggered is still pending/running.
+  #                                           # Finishing post_treatment COMPLETES the experiment: agents stop and
+  #                                           # the process exits cleanly.
+  #
+  #   # --- intervention: orchestrator-triggered bulk action (paper section 3.1) ---
+  #   # Only read for accounts with experiment_design.treatment_arms set above. Fires exactly
+  #   # once, at execution_time, for every account whose treatment arm is in applies_to_arms --
+  #   # reuses execute_action(), the same dispatcher the Agent Runtime and cold-start already
+  #   # use, not a separate action path. Every target gets a real attempt (retried with
+  #   # backoff), and the phase won't advance until the whole intervention has finished.
+  #   intervention:
+  #     action: mute                         # any execute_action() action
+  #     target_accounts: untrustworthy_sources       # a name from account_lists above
+  #     selection_rule: random70             # `all`, or randomNN for a random NN% sampled per sockpuppet
+  #     execution_time: end_of_pre_treatment # end_of_pre_treatment (as `treatment` begins) or end_of_treatment
+  #     applies_to_arms:                     # which treatment_arms values above receive this intervention
+  #       - treatment

@@ -17,10 +17,21 @@ class AgentState:
 
     def __init__(self, path):
         self.path = path
+        self.persona_prompt = None
+        self.account_metadata = {}
         self.following_list = []
         self.muted_accounts = []
+        # Tweet ids this account has already liked/reposted. Parallel to
+        # following_list/muted_accounts: they record platform relationships
+        # that outlive interaction_history, so a decision can be recognized
+        # as redundant even when the history has been trimmed or reset (a
+        # re-like returns a 139 "has already favorited" error, still counts
+        # toward a phase's action budget, and pollutes the engagement log).
+        self.liked_tweets = []
+        self.retweeted_tweets = []
         self.interaction_history = []
         self.initialization_progress = {"completed": False, "completed_at": None}
+        self.internal_memory = {}
         self._load()
 
     def _load(self):
@@ -28,26 +39,63 @@ class AgentState:
             return
         with open(self.path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        self.persona_prompt = data.get("persona_prompt")
+        self.account_metadata = data.get("account_metadata", {})
         self.following_list = data.get("following_list", [])
         self.muted_accounts = data.get("muted_accounts", [])
+        self.liked_tweets = data.get("liked_tweets", [])
+        self.retweeted_tweets = data.get("retweeted_tweets", [])
         self.interaction_history = data.get("interaction_history", [])
         self.initialization_progress = data.get(
             "initialization_progress", {"completed": False, "completed_at": None}
         )
+        self.internal_memory = data.get("internal_memory", {})
 
     def _save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(
                 {
+                    "persona_prompt": self.persona_prompt,
+                    "account_metadata": self.account_metadata,
                     "following_list": self.following_list,
                     "muted_accounts": self.muted_accounts,
+                    "liked_tweets": self.liked_tweets,
+                    "retweeted_tweets": self.retweeted_tweets,
                     "interaction_history": self.interaction_history,
                     "initialization_progress": self.initialization_progress,
+                    "internal_memory": self.internal_memory,
                 },
                 f,
                 indent=2,
             )
+
+    def record_agent_identity(self, persona_prompt, account_metadata):
+        """Persists the paper's `agent_state.persona_prompt`/
+        `account_metadata` (section 3.2's Initialization State). The persona
+        prompt is stored as the agent's own copy of the behavioral policy it
+        actually ran under -- the paper requires it stay fixed from
+        initialization through post-treatment, so a later edit to the
+        configured persona file is detectable rather than silent.
+        """
+        changed = False
+        if self.persona_prompt != persona_prompt:
+            self.persona_prompt = persona_prompt
+            changed = True
+        if self.account_metadata != account_metadata:
+            self.account_metadata = account_metadata
+            changed = True
+        if changed:
+            self._save()
+
+    def remember(self, key, value):
+        """Writes into the paper's `agent_state.internal_memory` -- free-form
+        per-agent scratch state that survives activations. Nothing in the
+        runtime depends on a particular shape here; it exists so an
+        experiment can carry agent-specific state without a schema change.
+        """
+        self.internal_memory[key] = value
+        self._save()
 
     def is_following(self, user_id) -> bool:
         return user_id in self.following_list
@@ -63,6 +111,22 @@ class AgentState:
     def mark_muted(self, user_id):
         if user_id not in self.muted_accounts:
             self.muted_accounts.append(user_id)
+            self._save()
+
+    def is_liked(self, tweet_id) -> bool:
+        return tweet_id in self.liked_tweets
+
+    def mark_liked(self, tweet_id):
+        if tweet_id not in self.liked_tweets:
+            self.liked_tweets.append(tweet_id)
+            self._save()
+
+    def is_retweeted(self, tweet_id) -> bool:
+        return tweet_id in self.retweeted_tweets
+
+    def mark_retweeted(self, tweet_id):
+        if tweet_id not in self.retweeted_tweets:
+            self.retweeted_tweets.append(tweet_id)
             self._save()
 
     def record_interaction(self, action, target, phase, execution_status=None, system_response=None):

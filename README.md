@@ -104,8 +104,9 @@ Every key below is a **default** that applies to any account that doesn't overri
 | Key | Description | Default |
 |---|---|---|
 | `platform` | Which scraper implementation to use. Currently only `twitter` | *(required, here or per-account)* |
-| `data_collection.targets` | Which timeline(s) to observe. One of `home` (X's algorithmic default feed — the "Home" tab, GraphQL `HomeTimeline`), `following` (X's reverse-chronological feed — the "Following" tab, GraphQL `HomeLatestTimeline`), or `search` (keyword search) — exactly one entry per account for now (see below). `home` and `following` are easy to mix up by name alone; see the naming key comment near the top of `src/scraper/twitter.py` if in doubt | *(required, here or per-account)* |
+| `data_collection.targets` | What to collect. **Observation feeds** — `home` (X's algorithmic default feed — the "Home" tab, GraphQL `HomeTimeline`), `following` (X's reverse-chronological feed — the "Following" tab, GraphQL `HomeLatestTimeline`), `search` (keyword search); several may be listed. Plus two **derived data streams** — `engagement_log` (every action this account performs) and `intervention_history` (what the intervention did to it). `home` and `following` are easy to mix up by name alone; see the naming key comment near the top of `src/scraper/twitter.py` if in doubt | *(required, here or per-account)* |
 | `data_collection.search_query` | Query text for the `search` target ("All of these words" — plain keywords, no query operators yet). Required (here or per-account) if `search` is a target | *(required if using `search`)* |
+| `data_collection.observation_frequency` | How often platform state is observed. Only `every_visit` (one observation per activation) is implemented | `every_visit` |
 | `actions.follow_all` | Whether to run `follow_all()` at startup, following every account in the `follow_list` account list | `false` |
 | `scroll_delay` | Seconds between timeline requests. Minimum of 2 recommended | `2` |
 | `fetch_max_retries` | Retries for a single cursor before giving up and restarting the timeline from the top | `5` |
@@ -137,7 +138,9 @@ account_lists:
 
 Observation and actions are independent: `data_collection.targets` picks what gets scraped, `actions.follow_all` separately controls whether `follow_all()` runs at startup — you can follow without scraping, scrape without following, or both. `follow_all()` reads the `follow_list` account list; add more named lists as needed, nothing else changes until code reads a given name.
 
-Only one `data_collection.targets` entry is supported for the old scripted single-target loop — that path is still a single-threaded process that observes one timeline continuously. Simultaneous multi-target polling (observing `home` and `following` together every cycle) is supported, just not in that loop — see **Agent Runtime** below, which fetches a snapshot of every configured target each activation.
+Several observation targets can be collected at once in either mode: the Agent Runtime fetches a snapshot of every configured target each activation, while the old scripted path round-robins a few pages per target per rotation. A single target keeps the scripted path's original behavior exactly — one continuous, indefinite scroll.
+
+Each saved observation batch carries a self-describing header (`observation_id`, `timestamp_utc`, `experiment_id`, `agent_id`, `phase`, `treatment_arm`), so collected feed data can be split by experiment phase and treatment arm during analysis without cross-referencing any other log.
 
 Actions beyond `follow_all` (liking, retweeting, muting) are implemented (`favorite_tweet()`, `retweet()`, `mute_user()`, `follow_user()`) and reachable through a single dispatcher, `TwitterScraper.execute_action(action, target)`. Outside of `follow_all()`, the only thing that calls it automatically today is the Agent Runtime's LLM-driven decision loop, below.
 
@@ -166,6 +169,8 @@ sockpuppet_config:
 
 Follows are sampled (shuffled, not sequential) from the configured account lists and self-throttled to stay under the live follow rate limit (15/15min) instead of reacting to `429`s. Engagement candidates (likes/reposts) come from the account's own Home feed (GraphQL `HomeTimeline`) — not yet scoped to tweets *from* the configured account lists specifically, since that needs a per-account tweet-fetch endpoint this codebase doesn't have captured yet (see `ROADMAP.md` Phase 4a). Progress and completion are persisted in agent-state, so a restart resumes rather than restarting from zero, and a completed cold-start never re-runs.
 
+**Cold-start engagement is persona-driven** when the account has a `persona_prompt` configured: each candidate post goes through the *same* decision cycle the later phases use (see **Agent Runtime** below), with the action set restricted to follow/like/repost — no mute. That's what makes each account's initialization reflect its own persona rather than a generic pattern, which matters because this phase is what shapes the baseline feed the experiment then measures. Without a persona configured, engagement falls back to a random like-or-repost choice.
+
 `main.py` rejects a configured `min_follows` at startup if it isn't reachable within `max_initialization_days` given the 400/day follow limit.
 
 Commented out by default in `config.yaml` — this performs real follow/like/repost actions against the live account, so uncomment and set real values deliberately.
@@ -191,9 +196,11 @@ experiment_design:
 | Key | Description |
 |---|---|
 | `sockpuppet_config.persona_prompt` | Path to a text file with the persona's profile summary + behavioral tendencies (see `personas/example_persona.txt.example`). Enables Agent Runtime mode |
-| `sockpuppet_config.phase` | Current experiment phase (`initialization` restricts actions to follow/like/retweet; anything else also allows mute). Stand-in for the Experiment Orchestrator (roadmap Phase 5), which will assign this per-agent |
-| `sockpuppet_config.treatment_arm` | Stand-in for the orchestrator's real randomized treatment assignment |
-| `sockpuppet_config.activation_schedule` | How long the runtime waits between decision cycles. `distribution: uniform` samples evenly between `min_interval`/`max_interval`; `truncated_powerlaw` is approximated as a log-uniform draw over the same range (no shape parameter is specified in the paper's schema to do otherwise) |
+| `sockpuppet_config.phase` | Current experiment phase (`initialization` restricts actions to follow/like/retweet; anything else also allows mute). Static per-account value, used only when `experiment_design.treatment_arms` (below) is NOT set for this account — an opted-in account's real phase comes from the Experiment Orchestrator instead (see **Experiment Orchestrator** below) |
+| `sockpuppet_config.treatment_arm` | Static per-account override, used only when `experiment_design.treatment_arms` is NOT set — an opted-in account's real, randomized assignment comes from the orchestrator instead |
+| `sockpuppet_config.activation_schedule` | How long the runtime waits between decision cycles. `distribution: uniform` samples evenly between `min_interval`/`max_interval`; `truncated_powerlaw` is approximated as a log-uniform draw over the same range; `poisson` draws exponential inter-arrival times with the window's midpoint as the mean, clamped into the window (the schema gives a window, not a rate) |
+| `sockpuppet_config.agent_id` | Stable identifier for this sockpuppet within the experiment, written into every observation, runtime-log, and engagement row | *(defaults to the account name)* |
+| `sockpuppet_config.action_rate_limits` | Per-action pacing on top of the platform's own limits, e.g. `retweet: {max_per_hour: 4, min_interval: 8m}`. An action with no entry is uncapped. Both constraints apply independently — an hourly cap alone still permits a burst within a minute. A capped decision becomes a logged `no_action` with `no_action_reason: "rate_capped"` rather than blocking the activation. The retweet defaults are sized from live observation (~35% retweet success rate, misleading platform refusals), not a documented limit — see `ROADMAP.md` |
 | `experiment_design.experiment_name` | Used to build a readable `experiment_id` (`<experiment_name>::<account_name>`) in the runtime's `experiment_context` |
 
 Each activation fetches one snapshot of every configured `data_collection.targets` (multiple targets are allowed here, unlike the scripted path). **Every individual post in that snapshot then gets its own independent Prompt Construction → Decision → Execution → Logging pass** — one LLM call per post, not one call for the whole batch. This matches the paper's own worked example ("for each X item in the feed, decide whether or not to engage") and avoids overwhelming the model with dozens of competing candidates in one prompt; live testing found a whole-batch-in-one-prompt design made the model default to `like` almost every cycle instead of reasoning through compound persona triggers. `activation_schedule` still governs the interval *between* activations (platform visits) — not between individual post evaluations within one activation, which happen back-to-back.
@@ -208,7 +215,63 @@ Since one activation now makes as many LLM calls as there are observed posts (ra
 
 Commented out by default in `config.yaml` — this makes real LLM calls and real follow/like/repost/mute actions against the live account.
 
-> **Known limitation:** cold-start (above) is still a separate scripted loop, not routed through this decision cycle — the paper describes cold-start as the same cycle with a restricted action set, but migrating it wasn't required to get the Agent Runtime itself working. See `ROADMAP.md` Phase 4.
+Cold-start (above) runs this same cycle with a restricted action set when a persona is configured, matching the paper's design.
+
+### Experiment Orchestrator (`experiment_design.treatment_arms`)
+
+Setting `experiment_design.treatment_arms` (a non-empty list, e.g. `[control, treatment]`) opts an account **into** a shared, thread-safe `ExperimentOrchestrator` (roadmap Phase 5) — every account keeps running its own Agent Runtime/cold-start loop in its own thread exactly as above, but consults the orchestrator instead of static `sockpuppet_config` values for phase, treatment arm, and the follow-rate budget. An account with no `treatment_arms` set is entirely unaffected, even if an orchestrator exists for sibling accounts in the same process.
+
+```yaml
+experiment_design:
+  experiment_name: mercury_muting
+  treatment_arms:
+    - control
+    - treatment
+  randomization:
+    method: simple_random
+    seed: 42
+    ratios:
+      control: 0.5
+      treatment: 0.5
+  recovery_policy:
+    max_consecutive_failures: 5
+    backoff: 1m
+    max_backoff: 30m
+  phase_durations:
+    initialization: adaptive   # ends on initialization_params, not a clock
+    pre_treatment: 3d
+    treatment:                 # dict form: whichever comes first
+      max_duration: 7d
+      max_action_count: 10000
+    post_treatment: 3d         # omit to run indefinitely with no further auto-transition
+
+intervention:
+  action: mute
+  target_accounts: untrustworthy_sources
+  selection_rule: random70
+  execution_time: end_of_pre_treatment
+  applies_to_arms:
+    - treatment
+```
+
+| Key | Description |
+|---|---|
+| `experiment_design.treatment_arms` | The experiment's arms. Every opted-in account must agree on this and on `randomization`/`phase_durations` (validated at startup — one Experiment Orchestrator per process) |
+| `experiment_design.randomization.method` | Assignment procedure. Only `simple_random` is implemented; anything else is rejected at startup rather than silently treated as simple random |
+| `experiment_design.randomization.seed` | Makes the treatment-arm split reproducible. Assignment happens **at the end of the pre-treatment phase**, not at startup, and is then persisted (`data/state/_experiments/<experiment_name>/orchestrator_state.json`) — a later seed change never silently reassigns an already-committed experiment |
+| `experiment_design.randomization.ratios` | Per-arm split (must sum to 1.0); omit for an even split across `treatment_arms` |
+| `experiment_design.recovery_policy` | How an account recovers from a failed activation: waits `backoff` doubled per consecutive failure (capped at `max_backoff`), giving up after `max_consecutive_failures`, without touching any other account's schedule |
+| `experiment_design.phase_durations` | Per phase, driving automatic `pre_treatment → treatment → post_treatment` transitions. Each entry is either a bare duration (`3d`) or `{max_duration, max_action_count}` to end on whichever comes first — `max_action_count` counts real, agent-selected actions (not `no_action`) by any one participating account. `initialization: adaptive` marks the cold-start phase as governed by `initialization_params` instead of a clock. A phase with no entry never auto-transitions |
+| `intervention` | Top-level namespace (sibling to `experiment_design`), only read for opted-in accounts. Fires exactly once, at `execution_time` (`end_of_pre_treatment` / `end_of_treatment`), for every account whose arm is in `applies_to_arms`: samples per `selection_rule` (`all`, or `randomNN` for a random NN%) from `target_accounts` (a name from `account_lists`) and runs `action` against each sampled `user_id`, through the same `execute_action()` dispatcher the Agent Runtime uses |
+
+What the orchestrator actually replaces for an opted-in account:
+- **Phase & treatment arm** — real, shared state instead of a static per-account value. The arm split is drawn once, centrally, at the *end* of pre-treatment, so agents run a condition-blind baseline first; every account's `experiment_context` then reflects it.
+- **Follow rate limit** — cold-start's/the Agent Runtime's follow decisions share ONE cross-account 15-per-15-minutes budget (`ExperimentOrchestrator.acquire_follow_slot`) instead of each account self-throttling against its own independent window — closes a real gap where N concurrently-running accounts could otherwise each believe they had their own fresh budget.
+- **Intervention execution** — a bulk, orchestrator-triggered action (e.g. the Mercury case study's "mute 70% of a list") distinct from the persona's own organic decisions, guaranteed to run exactly once per account via an atomic pending→running→completed claim. Every target gets a real attempt (retried with backoff), and a phase never advances while an intervention it triggered is still running.
+- **Failure recovery** — a failed activation is recorded centrally and that one agent backs off and retries per `recovery_policy`, instead of the exception killing its thread for good.
+- **Termination** — finishing the last phase completes the experiment (`experiment_status: completed`), logs a termination event, and every account stops acting and exits, so the process shuts down cleanly rather than running on past the end of the experiment. `experiment_status` also supports `paused`, which freezes phase transitions and idles every agent without ending the experiment.
+
+Every scheduling decision, treatment assignment, intervention execution, phase transition, account failure, and termination is recorded to a separate reproducibility log (`data/<date>/_orchestrator/_experiment/run_..._reproducibility_log.jsonl`).
 
 ## Follow list
 

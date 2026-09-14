@@ -15,6 +15,7 @@ from storage.agent_state import AgentState
 from runtime.decision import DecisionEngine
 from runtime.prompt import construct_prompt
 from utils.duration import parse_duration
+from utils.rate_budget import build_budgets
 
 # Naming key, since these two GraphQL operation names are easy to conflate:
 #   - `HomeTimeline`       -- X's algorithmic default feed, i.e. the "Home"
@@ -107,6 +108,30 @@ FOLLOW_RATE_WINDOW_SECONDS = 15 * 60
 # already acted on (roadmap Phase 4e follow-up -- see run_agent_runtime).
 RECENT_INTERACTIONS_WINDOW = 10
 
+# Pages fetched per target per rotation when the old scripted path is
+# configured with more than one target (see _run_scripted_observation).
+# Small on purpose: the point is alternating coverage of both feeds, not
+# deep pagination of either.
+SCRIPTED_ROUND_ROBIN_PAGES = 3
+
+# How long a paused agent waits before re-checking experiment_status, and
+# the slice size long sleeps are broken into so a completed experiment is
+# noticed promptly (see _sleep_interruptible).
+PAUSED_POLL_SECONDS = 30
+STOP_CHECK_SLICE_SECONDS = 5
+
+# One bounded retry for an agent-selected action that fails transiently
+# (see _execute_agent_action).
+AGENT_ACTION_MAX_ATTEMPTS = 2
+AGENT_ACTION_RETRY_SECONDS = 5
+
+# Markers in a failure reason that mean the platform DECLINED the action on
+# purpose (anti-automation, authorization, rate limiting) rather than
+# failing transiently. These are never retried -- retrying a deliberate
+# refusal would be working around an anti-abuse control, not recovering
+# from an error.
+PLATFORM_REFUSAL_MARKERS = ("automated", "authorization", "rate_limited", "not authorized")
+
 
 class FetchFailedError(Exception):
     """Raised when a timeline fetch doesn't return usable JSON (bad body, rate limit, etc.)."""
@@ -148,6 +173,40 @@ class TwitterScraper(BaseScraper):
             self.runtime_file_manager = FileManager(
                 settings.OUTPUT_DIR, "twitter", "runtime_log", account.name, account.timezone, stream="runtime_log"
             )
+        # Optional per-account data streams from the paper's Data Streams
+        # list (section 4), enabled by naming them in
+        # `data_collection.targets`: Engagement History and Intervention
+        # History. Both are derived from actions this account takes, so they
+        # are written here rather than by observe().
+        self.engagement_file_manager = (
+            FileManager(
+                settings.OUTPUT_DIR, "twitter", "engagement_log", account.name,
+                account.timezone, stream="engagement_log",
+            )
+            if "engagement_log" in account.data_streams else None
+        )
+        self.intervention_file_manager = (
+            FileManager(
+                settings.OUTPUT_DIR, "twitter", "intervention_history", account.name,
+                account.timezone, stream="intervention_history",
+            )
+            if "intervention_history" in account.data_streams else None
+        )
+
+        # agent_state.persona_prompt/account_metadata (paper section 3.2's
+        # Initialization State) -- the agent's own record of the behavioral
+        # policy and identity it actually ran under, which the paper
+        # requires stay fixed from initialization through post-treatment.
+        self.agent_state.record_agent_identity(
+            persona_prompt=account.get_persona_prompt_text() if account.agent_runtime_enabled else None,
+            account_metadata={
+                "agent_id": account.agent_id,
+                "account_name": account.name,
+                "platform": account.platform,
+                "experiment_id": account.experiment_id,
+                "observation_targets": list(account.targets),
+            },
+        )
 
         self._log("Initialising x-client-transaction-id generator...")
         self.ct = fetch_and_init()
@@ -171,6 +230,12 @@ class TwitterScraper(BaseScraper):
         if account.actions.get("follow_all"):
             self.follow_all()
 
+        if self.orchestrator is not None:
+            # Gives the shared ExperimentOrchestrator (roadmap Phase 5) a
+            # live scraper to execute this account's intervention through,
+            # reusing execute_action() rather than a parallel action path.
+            self.orchestrator.register_scraper(account.name, self)
+
         self.run_cold_start()
 
         if account.agent_runtime_enabled:
@@ -181,45 +246,112 @@ class TwitterScraper(BaseScraper):
             return
 
         # Observation and actions are independent now (see config.yaml).
-        # main.validate_targets() already guaranteed exactly one valid
-        # target before this scraper was even constructed, when not in
-        # Agent Runtime mode.
-        handler_name = self.OBSERVATION_HANDLERS[account.targets[0]]
-        getattr(self, handler_name)()
+        self._run_scripted_observation()
+
+    def _run_scripted_observation(self):
+        """The old scripted (non-Agent-Runtime) observation path.
+
+        A single configured target keeps its original behavior exactly: one
+        continuous, indefinite scroll through that timeline. With several
+        targets it round-robins a bounded number of pages per target, so an
+        account without a persona can still collect the paper's two feeds
+        (For You *and* the reverse-chronological Home timeline, section 4)
+        instead of only ever scrolling one of them.
+        """
+        targets = self.account.targets
+        if len(targets) == 1:
+            handler_name = self.OBSERVATION_HANDLERS[targets[0]]
+            getattr(self, handler_name)()
+            return
+
+        self._log(
+            f"Round-robin scripted observation across {targets} "
+            f"({SCRIPTED_ROUND_ROBIN_PAGES} page(s) per target per rotation)."
+        )
+        while not self._should_stop():
+            if self._idle_while_paused():
+                continue
+            for target in targets:
+                if self._should_stop():
+                    return
+                handler_name = self.OBSERVATION_HANDLERS[target]
+                getattr(self, handler_name)(max_pages=SCRIPTED_ROUND_ROBIN_PAGES)
+
+    def _should_stop(self) -> bool:
+        """True once the orchestrator reports the experiment complete
+        (roadmap Phase 5 termination) -- every long-running loop checks this
+        so agents stop acting and their threads exit cleanly instead of
+        outliving the experiment. Always False for a non-orchestrated
+        account, which has no experiment to end.
+        """
+        return self.orchestrator is not None and self.orchestrator.should_stop()
+
+    def _idle_while_paused(self) -> bool:
+        """Sleeps a beat if the experiment is paused (paper section 3.4's
+        `experiment_status: paused`), returning True if it was -- so callers
+        can `continue` rather than acting. False when not paused, or when
+        this account isn't orchestrated at all.
+        """
+        if self.orchestrator is None or not self.orchestrator.is_paused():
+            return False
+        self._log("[runtime] Experiment is paused; idling.")
+        self._sleep_interruptible(PAUSED_POLL_SECONDS)
+        return True
+
+    def _sleep_interruptible(self, seconds):
+        """Sleeps in short slices so a completed/paused experiment is
+        noticed promptly rather than after a full multi-hour activation
+        interval has elapsed.
+        """
+        remaining = seconds
+        while remaining > 0:
+            if self._should_stop():
+                return
+            time.sleep(min(STOP_CHECK_SLICE_SECONDS, remaining))
+            remaining -= STOP_CHECK_SLICE_SECONDS
 
     def _log(self, message):
         print(f"[{self.account.name}] {message}")
 
-    def fetch_home(self):
+    def fetch_home(self, max_pages=None):
         """Observes the "home" target: X's algorithmic default feed (the
         "Home" tab; GraphQL operation `HomeTimeline`, see `fetch_home_timeline()`).
         """
         self._log("Observing Home (X's algorithmic default feed, GraphQL HomeTimeline).")
         self._scrape_timeline(
-            self.fetch_home_timeline, HOME_TIMELINE_PATH, track_seen_ids=True
+            self.fetch_home_timeline, HOME_TIMELINE_PATH, "home",
+            track_seen_ids=True, max_pages=max_pages,
         )
 
-    def fetch_following(self):
+    def fetch_following(self, max_pages=None):
         """Observes the "following" target: X's reverse-chronological feed
         (the "Following" tab; GraphQL operation `HomeLatestTimeline`, see
         `fetch_home_latest_timeline()`).
         """
         self._log("Observing Following (X's chronological feed, GraphQL HomeLatestTimeline).")
         self._scrape_timeline(
-            self.fetch_home_latest_timeline, HOME_TIMELINE_PATH
+            self.fetch_home_latest_timeline, HOME_TIMELINE_PATH, "following", max_pages=max_pages
         )
 
-    def fetch_search_timeline(self):
+    def fetch_search_timeline(self, max_pages=None):
         query = self.account.search_query
         self._log(f"Observing Search results for query: {query!r}")
         self._scrape_timeline(
-            self.fetch_search_latest, SEARCH_TIMELINE_PATH, track_seen_ids=True
+            self.fetch_search_latest, SEARCH_TIMELINE_PATH, "search",
+            track_seen_ids=True, max_pages=max_pages,
         )
 
-    def _scrape_timeline(self, fetch_fn, timeline_path, track_seen_ids=False):
+    def _scrape_timeline(self, fetch_fn, timeline_path, target_name, track_seen_ids=False, max_pages=None):
+        """Continuously scrolls one timeline, saving each page.
+
+        `max_pages` bounds how many pages this call fetches before
+        returning, so _run_scripted_observation can rotate between several
+        targets; None keeps the original indefinite behavior.
+        """
         cursor = None
         num_tweets = 0
         consecutive_empty_batches = 0
+        pages = 0
 
         if track_seen_ids:
             # Rolling: IDs from the page we just fetched, echoed back to
@@ -230,10 +362,22 @@ class TwitterScraper(BaseScraper):
             self.seen_tweet_ids = []
             # Separate, capped local cache of every tweet_id collected this
             # run, used only to keep exact duplicates out of the JSONL
-            # output; never sent over the wire.
-            self._collected_tweet_ids = OrderedDict()
+            # output; never sent over the wire. Kept PER TARGET and across
+            # calls, so round-robin rotations don't reset the cache (or let
+            # one target's ids suppress another's).
+            if not hasattr(self, "_collected_tweet_ids_by_target"):
+                self._collected_tweet_ids_by_target = {}
+            self._collected_tweet_ids = self._collected_tweet_ids_by_target.setdefault(
+                target_name, OrderedDict()
+            )
 
         while True:
+            if self._should_stop():
+                self._log("Experiment complete; stopping observation.")
+                return
+            if self._idle_while_paused():
+                continue
+
             result = self._fetch_and_parse_with_retry(fetch_fn, cursor, timeline_path)
 
             if result is None:
@@ -288,7 +432,18 @@ class TwitterScraper(BaseScraper):
             num_tweets += len(tweets)
             self._log(f"{num_tweets} tweets collected")
             if tweets:
-                self.file_manager.save_data(tweets)
+                # Full Observation Schema (paper section 4) -- see
+                # _observation_metadata. Every batch carries the experiment/
+                # agent/phase/arm header, so collected feed data is
+                # self-describing for analysis.
+                record = self._observation_metadata(str(uuid.uuid4()))
+                record["target"] = target_name
+                record["tweets"] = tweets
+                self.file_manager.save_data(record)
+
+            pages += 1
+            if max_pages is not None and pages >= max_pages:
+                return
 
             if not next_cursor or next_cursor == cursor:
                 self._log(
@@ -440,6 +595,16 @@ class TwitterScraper(BaseScraper):
         if action == "no_action":
             return {"execution_status": "skipped", "system_response": None}
 
+        if action == "follow" and self.orchestrator is not None:
+            # Orchestrated accounts (roadmap Phase 5) share ONE
+            # cross-account follow-rate budget instead of each account's
+            # own FOLLOW_RATE_LIMIT window -- closes the roadmap's flagged
+            # gap ("must also respect the 15/15min follow rate limit
+            # across concurrently-active agents"). Covers every follow
+            # path (cold-start, follow_all, and agent-runtime decisions),
+            # not just _throttled_follow's callers.
+            self.orchestrator.acquire_follow_slot(self.account.name)
+
         handler_name = self.ACTION_HANDLERS.get(action)
         if not handler_name:
             raise ValueError(
@@ -454,6 +619,10 @@ class TwitterScraper(BaseScraper):
                 self.agent_state.mark_followed(target)
             elif action == "mute":
                 self.agent_state.mark_muted(target)
+            elif action == "like":
+                self.agent_state.mark_liked(target)
+            elif action == "retweet":
+                self.agent_state.mark_retweeted(target)
         else:
             # Surface failures loudly and with the actual reason (e.g. a
             # GraphQL "this request looks like it might be automated"
@@ -466,10 +635,12 @@ class TwitterScraper(BaseScraper):
                 f"(status_code={result.get('status_code')})"
             )
 
-        return {
+        structured = {
             "execution_status": "success" if success else "failure",
             "system_response": {k: v for k, v in result.items() if k != "success"},
         }
+        self._record_engagement(action, target, structured)
+        return structured
 
     def _txid(self, method: str, path: str) -> str:
         return self.ct.generate(method, path)
@@ -638,6 +809,27 @@ class TwitterScraper(BaseScraper):
         candidate_idx = 0
         engagement_queue = []
 
+        # Cold-start engagement runs the SAME decision cycle as the later
+        # phases, restricted to follow/like/repost (paper section 3.2: "At
+        # each activation, the agent executes the same runtime decision
+        # cycle used during later experimental phases. During
+        # initialization, however, available actions are restricted"). That
+        # makes each agent's initialization reflect its own persona --
+        # which is the whole point, since this phase is what shapes the
+        # baseline feed the experiment then measures.
+        cold_start_actions = self._allowed_actions_for_phase("initialization")
+        persona_prompt = None
+        engine = None
+        if account.agent_runtime_enabled:
+            persona_prompt = account.get_persona_prompt_text()
+            engine = self._get_decision_engine()
+        else:
+            self._log(
+                "[cold-start] No sockpuppet_config.persona_prompt configured, so engagement "
+                "choices fall back to a random like/repost -- configure a persona for "
+                "persona-driven initialization."
+            )
+
         def follows_done():
             return len(self.agent_state.following_list)
 
@@ -645,6 +837,11 @@ class TwitterScraper(BaseScraper):
             return self.agent_state.count_interactions(phase="initialization", actions=("like", "retweet"))
 
         while follows_done() < min_follows or engagements_done() < min_engagements:
+            if self._should_stop():
+                self._log("[cold-start] Experiment complete; stopping initialization.")
+                return
+            if self._idle_while_paused():
+                continue
             if time.time() >= deadline:
                 self._log(
                     f"[cold-start] max_initialization_days ({max_days}) elapsed with "
@@ -679,15 +876,33 @@ class TwitterScraper(BaseScraper):
                 tweet_id = tweet.get("tweet_id")
                 if not tweet_id:
                     continue
-                action = random.choice(["like", "retweet"])
-                self._log(f"[cold-start] {action}-ing tweet {tweet_id} ({engagements_done()}/{min_engagements})")
-                result = self.execute_action(action, tweet_id)
-                if result["execution_status"] == "success":
-                    self.agent_state.record_interaction(
-                        action, tweet_id, phase="initialization",
-                        execution_status=result["execution_status"],
-                        system_response=result["system_response"],
+
+                if engine is not None:
+                    # Persona-driven: the decision cycle records the
+                    # interaction and the runtime_log row itself, using
+                    # phase="initialization" so engagements_done() counts
+                    # them and _allowed_actions_for_phase keeps mute out.
+                    self._log(
+                        f"[cold-start] Evaluating tweet {tweet_id} "
+                        f"({engagements_done()}/{min_engagements} engagements)"
                     )
+                    self._decide_and_execute(
+                        persona_prompt, engine, tweet, "home",
+                        "initialization", cold_start_actions, str(uuid.uuid4()),
+                    )
+                else:
+                    action = random.choice(["like", "retweet"])
+                    self._log(
+                        f"[cold-start] {action}-ing tweet {tweet_id} "
+                        f"({engagements_done()}/{min_engagements})"
+                    )
+                    result = self.execute_action(action, tweet_id)
+                    if result["execution_status"] == "success":
+                        self.agent_state.record_interaction(
+                            action, tweet_id, phase="initialization",
+                            execution_status=result["execution_status"],
+                            system_response=result["system_response"],
+                        )
                 time.sleep(account.scroll_delay)
                 continue
 
@@ -728,7 +943,16 @@ class TwitterScraper(BaseScraper):
         """Self-throttles to stay under FOLLOW_RATE_LIMIT per
         FOLLOW_RATE_WINDOW_SECONDS, sleeping ahead of a 429 instead of
         reacting to one. Returns execute_action()'s structured result.
+
+        Orchestrated accounts (roadmap Phase 5) delegate straight to
+        execute_action(), which already acquires a slot from the shared,
+        cross-account budget -- also going through this instance's own
+        self._follow_timestamps would double-throttle against a budget
+        this account no longer owns alone.
         """
+        if self.orchestrator is not None:
+            return self.execute_action("follow", user_id)
+
         now = time.time()
         timestamps = [t for t in getattr(self, "_follow_timestamps", []) if now - t < FOLLOW_RATE_WINDOW_SECONDS]
         if len(timestamps) >= FOLLOW_RATE_LIMIT:
@@ -791,21 +1015,133 @@ class TwitterScraper(BaseScraper):
             return ["follow", "like", "retweet", "no_action"]
         return ["follow", "like", "retweet", "mute", "no_action"]
 
-    def _build_experiment_context(self) -> dict:
+    def _build_experiment_context(self, allowed_actions=None) -> dict:
         """experiment_context (paper section 3.3): experiment_id/phase/
-        treatment_arm/intervention_status are stand-ins here -- Account
-        exposes them from `sockpuppet_config`/`experiment_design` config for
-        now, superseded by the Experiment Orchestrator's real per-agent
-        state once it exists (roadmap Phase 5).
+        treatment_arm/intervention_status/current_time/runtime_constraints.
+        Orchestrated accounts (`experiment_design.treatment_arms`
+        configured, roadmap Phase 5) get the experiment fields from the
+        shared ExperimentOrchestrator's real state; everything else keeps
+        reading the static per-account config stand-in.
         """
         account = self.account
+        if self.orchestrator is not None:
+            context = self.orchestrator.build_experiment_context(account.name)
+        else:
+            context = {
+                "experiment_id": account.experiment_id,
+                "phase": account.experiment_phase,
+                "treatment_arm": account.treatment_arm,
+                "intervention_status": "none",
+                "current_time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+        # `runtime_constraints` is the last experiment_context field in the
+        # paper's section 3.3 listing. Rendered as a flat string because the
+        # whole context dict is dumped key: value into the prompt -- a
+        # nested dict would reach the model as a Python repr.
+        constraints = [f"allowed_actions={','.join(allowed_actions)}"] if allowed_actions else []
+        constraints.append(f"follow_rate_limit={FOLLOW_RATE_LIMIT}/{FOLLOW_RATE_WINDOW_SECONDS // 60}min")
+        context["runtime_constraints"] = "; ".join(constraints)
+        return context
+
+    def _observation_metadata(self, observation_id) -> dict:
+        """The paper's Observation Schema header (section 4): observation_id,
+        timestamp_utc, experiment_id, agent_id, phase, treatment_arm. Every
+        saved platform observation carries this, so collected feed data can
+        be split by phase and arm during analysis without cross-referencing
+        the orchestrator's own logs.
+        """
+        account = self.account
+        orchestrated_phase = self._orchestrated_phase()
         return {
+            "observation_id": observation_id,
+            "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "experiment_id": account.experiment_id,
-            "phase": account.experiment_phase,
-            "treatment_arm": account.treatment_arm,
-            "intervention_status": "none",
-            "current_time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "agent_id": account.agent_id,
+            "phase": orchestrated_phase if orchestrated_phase is not None else account.experiment_phase,
+            "treatment_arm": (
+                self.orchestrator.get_treatment_arm(account.name)
+                if self.orchestrator is not None else account.treatment_arm
+            ),
         }
+
+    def _record_engagement(self, action, target, result):
+        """Engagement History stream (paper section 4: "All engagement
+        behaviors performed by the sockpuppet"). Written for every real
+        action this account takes, wherever it originated -- cold-start,
+        follow_all, an Agent Runtime decision, or an orchestrator-triggered
+        intervention -- so the engagement log is a complete record rather
+        than only what the LLM chose.
+        """
+        file_manager = getattr(self, "engagement_file_manager", None)
+        if file_manager is None:
+            return
+        entry = self._observation_metadata(str(uuid.uuid4()))
+        entry.pop("observation_id")
+        entry.update({
+            "action": action,
+            "target_object": target,
+            "execution_status": result.get("execution_status"),
+            "system_response": result.get("system_response"),
+        })
+        file_manager.save_data(entry)
+
+    def write_intervention_history(self, record: dict):
+        """Intervention History stream (paper section 4: "Records describing
+        when experimental interventions were applied and which accounts were
+        affected"). Called by the ExperimentOrchestrator after it runs this
+        account's intervention; a no-op unless the account enabled the
+        stream via `data_collection.targets`.
+        """
+        file_manager = getattr(self, "intervention_file_manager", None)
+        if file_manager is None:
+            return
+        file_manager.save_data({
+            "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            **record,
+        })
+
+    def _try_consume_action_slot(self, action) -> tuple:
+        """Per-action pacing check (`sockpuppet_config.action_rate_limits`),
+        returning (allowed, retry_after_seconds).
+
+        Routes to the orchestrator for an orchestrated account so the
+        budget is visible in the reproducibility log; a non-orchestrated
+        account keeps its own equivalent budgets, so pacing doesn't depend
+        on being part of a formal experiment.
+        """
+        if self.orchestrator is not None:
+            return self.orchestrator.try_consume_action_slot(self.account.name, action)
+
+        if not hasattr(self, "_own_action_budgets"):
+            self._own_action_budgets = build_budgets(self.account.action_rate_limits)
+        budget = self._own_action_budgets.get(action)
+        if budget is None:
+            return True, 0.0
+        return budget.try_consume()
+
+    def _current_phase(self) -> str:
+        """The phase to record an action under RIGHT NOW -- the
+        orchestrator's live phase for an orchestrated account, else the
+        static per-account config value. Must be re-read per action rather
+        than cached per activation: an activation spans many minutes, and a
+        phase transition partway through has to apply to the rest of it.
+        """
+        if self.orchestrator is not None:
+            return self.orchestrator.get_phase(self.account.name)
+        return self.account.experiment_phase
+
+    def _orchestrated_phase(self):
+        """Current orchestrator phase for this account, or None if it isn't
+        orchestrated (roadmap Phase 5) -- used to tag raw observation
+        records (as opposed to `_build_experiment_context()`'s full
+        decision-prompt context) so they can be split by experiment phase
+        during analysis without cross-referencing the orchestrator's own
+        phase-transition log. None (not a static-config fallback) for a
+        non-orchestrated account, so its saved records stay unchanged.
+        """
+        if self.orchestrator is None:
+            return None
+        return self.orchestrator.get_phase(self.account.name)
 
     def _resolve_target(self, action: str, tweet: dict) -> Optional[str]:
         """Deterministically derives target_object from the single tweet a
@@ -844,11 +1180,15 @@ class TwitterScraper(BaseScraper):
         explain), and otherwise one of:
         - "chose": the model was shown this post and genuinely decided
           no_action was the right call.
-        - "repeat": downgraded because it's an exact repeat of an
-          (action, target) pair that already succeeded before.
+        - "repeat": downgraded because it would repeat something already
+          done -- an (action, target) pair that already succeeded, or a
+          follow/mute of an account already followed/muted.
         - "failed": downgraded because the decision itself couldn't be
           honored -- either the action isn't allowed this phase, or this
           post's own data is missing the id the chosen action needs.
+        - "rate_capped": downgraded because this account's configured
+          pacing budget for that action (`action_rate_limits`) has no slot
+          free right now.
         """
         action = decision.action
 
@@ -879,6 +1219,44 @@ class TwitterScraper(BaseScraper):
             )
             return "no_action", None, "repeat"
 
+        # The interaction-history check above only sees what THIS decision
+        # cycle recorded. agent_state's own platform-state lists outlive it
+        # -- follow_all()'s startup follows and the orchestrator's
+        # intervention mutes never touch interaction_history at all, and a
+        # trimmed or reset history loses the rest. Both were observed live
+        # on 2026-09-09: 2 redundant follows on follow_list accounts, and a
+        # re-like that came back `139 has already favorited`. These are
+        # platform no-ops, but they still consume a rate slot, still count
+        # toward a phase's max_action_count, and land in the engagement log
+        # as failures that aren't really failures.
+        already = {
+            "follow": self.agent_state.is_following,
+            "mute": self.agent_state.is_muted,
+            "like": self.agent_state.is_liked,
+            "retweet": self.agent_state.is_retweeted,
+        }.get(action)
+        if already is not None and already(target):
+            self._log(
+                f"[runtime] LLM chose {action} on target_object={target!r}, which this account "
+                f"has already done; rejecting as no_action."
+            )
+            return "no_action", None, "repeat"
+
+        # Pacing gate, checked LAST so a capped action is only counted
+        # against the budget once every other check has passed -- a
+        # decision that was going to be rejected anyway must not burn a
+        # slot. Consumed per DECISION, so a retried attempt (see
+        # _execute_agent_action) doesn't take a second slot: worst-case
+        # attempt rate is 2x the configured cap.
+        allowed, retry_after = self._try_consume_action_slot(action)
+        if not allowed:
+            self._log(
+                f"[runtime] {action} on target_object={target!r} is within this account's "
+                f"pacing budget limit ({retry_after:.0f}s until the next slot); "
+                f"rejecting as no_action."
+            )
+            return "no_action", None, "rate_capped"
+
         return action, target, None
 
     def _sample_activation_interval(self) -> float:
@@ -900,11 +1278,21 @@ class TwitterScraper(BaseScraper):
             return min_interval
         if distribution == "truncated_powerlaw":
             return min_interval * (max_interval / min_interval) ** random.random()
+        if distribution == "poisson":
+            # A Poisson process has exponentially distributed inter-arrival
+            # times (paper section 3.4 lists Poisson processes among the
+            # supported scheduling policies). The config schema gives a
+            # window rather than a rate, so the mean is taken as the
+            # window's midpoint and draws are clamped into [min, max] --
+            # the same order of approximation as truncated_powerlaw above.
+            mean = (min_interval + max_interval) / 2
+            return min(max(random.expovariate(1.0 / mean), min_interval), max_interval)
         return random.uniform(min_interval, max_interval)
 
     def _log_runtime_cycle(
         self, observation_id, phase, prompt, decision, action, target,
         observed_tweet_id, result, target_name=None, no_action_reason=None,
+        platform_observation=None,
     ):
         """Logging stage (roadmap Phase 4, paper section 3.3 stage 5 /
         section 4 runtime_log schema). `data_collection.logging: minimal`
@@ -918,28 +1306,40 @@ class TwitterScraper(BaseScraper):
         follow/mute. `target_name` (which feed this post came from) is
         included when available for the same traceability reason.
 
-        `no_action_reason` (see `_validate_decision`) distinguishes the three
-        ways a row can end up `no_action` -- "chose" (the model genuinely
-        decided not to act), "repeat" (downgraded, exact repeat of a prior
-        success), "failed" (downgraded, disallowed action or missing target
-        data) -- always present when `action == "no_action"`, always None
-        otherwise.
+        `no_action_reason` (see `_validate_decision`) distinguishes the ways
+        a row can end up `no_action` -- "chose" (the model genuinely decided
+        not to act), "repeat" (downgraded, already done), "failed"
+        (downgraded, disallowed action or missing target data),
+        "rate_capped" (downgraded, pacing budget exhausted), and
+        "nothing_observed" (no post to decide on at all) -- always present
+        when `action == "no_action"`, always None otherwise.
         """
         entry = {
+            # `log_id` uniquely identifies this runtime_log row (paper
+            # section 4's Runtime Log Schema); `observation_id` still groups
+            # every row produced by the same activation.
+            "log_id": str(uuid.uuid4()),
             "observation_id": observation_id,
             "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "experiment_id": self.account.experiment_id,
+            "agent_id": self.account.agent_id,
             "phase": phase,
             "observed_tweet_id": observed_tweet_id,
             "target_name": target_name,
             "selected_action": action,
             "target_object": target,
             "no_action_reason": no_action_reason,
+            "execution_result": result,
             "execution_status": result["execution_status"],
             "system_response": result["system_response"],
         }
         if self.account.logging_level != "minimal":
             entry["constructed_prompt"] = prompt
             entry["model_output"] = decision.model_dump() if decision is not None else None
+            # `platform_observation` (paper section 3.3 stage 5): the actual
+            # post this decision concerned. Only under `logging: full` --
+            # it's the single largest field per row.
+            entry["platform_observation"] = platform_observation
         self.runtime_file_manager.save_data(entry)
 
     def run_agent_runtime(self):
@@ -970,70 +1370,202 @@ class TwitterScraper(BaseScraper):
         account = self.account
         self._log("Starting Agent Runtime decision loop.")
         persona_prompt = account.get_persona_prompt_text()
-        engine = DecisionEngine()
+        engine = self._get_decision_engine()
 
         while True:
-            phase = account.experiment_phase
-            allowed_actions = self._allowed_actions_for_phase(phase)
+            if self._should_stop():
+                self._log("[runtime] Experiment complete; stopping the decision loop.")
+                return
+            if self._idle_while_paused():
+                continue
 
-            platform_state = self.observe()
-            observation_id = str(uuid.uuid4())
-            self.file_manager.save_data({"observation_id": observation_id, "platform_state": platform_state})
+            try:
+                self._run_activation(persona_prompt, engine)
+            except Exception as e:
+                # Failure recovery (paper section 3.4 responsibility #6):
+                # an orchestrated agent records the failure centrally and
+                # reschedules per the recovery policy instead of letting one
+                # bad activation kill this account's thread for good. A
+                # non-orchestrated account keeps the old behavior (the
+                # exception propagates and stops that account).
+                if self.orchestrator is None:
+                    raise
+                wait = self.orchestrator.record_activation_failure(account.name, repr(e))
+                if wait is None:
+                    self._log(
+                        f"[runtime] Too many consecutive activation failures; stopping this "
+                        f"account. Last error: {e!r}"
+                    )
+                    return
+                self._log(f"[runtime] Activation failed ({e!r}); retrying in {wait:.0f}s.")
+                self._sleep_interruptible(wait)
+                continue
 
-            total_posts = sum(len(tweets) for tweets in platform_state.values())
-            if total_posts == 0:
-                # Nothing observed this activation -- still write one row so
-                # the runtime_log's audit trail (paper: Experiment
-                # Orchestrator responsibility #7, reproducibility logging)
-                # shows the activation happened rather than looking
-                # indistinguishable from a skipped/crashed one.
-                self._log("[runtime] Nothing observed this activation.")
-                result = self.execute_action("no_action", None)
-                self.agent_state.record_interaction(
-                    "no_action", None, phase=phase,
-                    execution_status=result["execution_status"],
-                    system_response=result["system_response"],
-                )
-                self._log_runtime_cycle(
-                    observation_id, phase, None, None, "no_action", None, None, result,
-                    no_action_reason="nothing_observed",
-                )
-            else:
-                for target_name, tweets in platform_state.items():
-                    for tweet in tweets:
-                        experiment_context = self._build_experiment_context()
-                        recent_interactions = self.agent_state.recent_interactions(
-                            limit=RECENT_INTERACTIONS_WINDOW, exclude_actions=("no_action",)
-                        )
-                        prompt = construct_prompt(
-                            persona_prompt, tweet, target_name, experiment_context,
-                            allowed_actions, recent_interactions,
-                        )
+            if self.orchestrator is not None:
+                self.orchestrator.record_activation_success(account.name)
 
-                        decision = engine.decide(prompt)
-                        action, target, no_action_reason = self._validate_decision(decision, tweet, allowed_actions)
-
-                        self._log(
-                            f"[runtime] Decision on tweet_id={tweet.get('tweet_id')}: "
-                            f"action={action}, target_object={target}"
-                            + (f", no_action_reason={no_action_reason}" if no_action_reason else "")
-                        )
-                        result = self.execute_action(action, target)
-
-                        self.agent_state.record_interaction(
-                            action, target, phase=phase,
-                            execution_status=result["execution_status"],
-                            system_response=result["system_response"],
-                        )
-                        self._log_runtime_cycle(
-                            observation_id, phase, prompt, decision, action, target,
-                            tweet.get("tweet_id"), result, target_name=target_name,
-                            no_action_reason=no_action_reason,
-                        )
+            # Re-check before announcing/scheduling the next activation --
+            # an activation that returned early because the experiment just
+            # completed must not log a next-activation time it will never
+            # honor.
+            if self._should_stop():
+                self._log("[runtime] Experiment complete; stopping the decision loop.")
+                return
 
             interval = self._sample_activation_interval()
             self._log(f"[runtime] Next activation in {interval:.0f}s.")
-            time.sleep(interval)
+            self._sleep_interruptible(interval)
+
+    def _get_decision_engine(self):
+        """One DecisionEngine per scraper, shared by the Agent Runtime and
+        persona-driven cold-start (they run the same decision cycle).
+        """
+        if getattr(self, "_decision_engine", None) is None:
+            self._decision_engine = DecisionEngine()
+        return self._decision_engine
+
+    def _run_activation(self, persona_prompt, engine):
+        """One activation: Observation -> per-post (Prompt Construction ->
+        Decision -> Execution -> Logging). Split out of run_agent_runtime()
+        so the loop above can wrap a whole activation in the orchestrator's
+        failure-recovery policy.
+        """
+        account = self.account
+        phase = self._current_phase()
+
+        if self.orchestrator is not None:
+            # Cheap, defensive check -- belt-and-suspenders against any
+            # registration/tick-timing edge case (roadmap Phase 5).
+            self.orchestrator.maybe_run_pending_intervention(account.name)
+
+        platform_state = self.observe()
+        observation_id = str(uuid.uuid4())
+        observation_record = self._observation_metadata(observation_id)
+        observation_record["platform_state"] = platform_state
+        self.file_manager.save_data(observation_record)
+
+        total_posts = sum(len(tweets) for tweets in platform_state.values())
+        if total_posts == 0:
+            # Nothing observed this activation -- still write one row so
+            # the runtime_log's audit trail (paper: Experiment
+            # Orchestrator responsibility #7, reproducibility logging)
+            # shows the activation happened rather than looking
+            # indistinguishable from a skipped/crashed one.
+            self._log("[runtime] Nothing observed this activation.")
+            result = self.execute_action("no_action", None)
+            self.agent_state.record_interaction(
+                "no_action", None, phase=phase,
+                execution_status=result["execution_status"],
+                system_response=result["system_response"],
+            )
+            self._log_runtime_cycle(
+                observation_id, phase, None, None, "no_action", None, None, result,
+                no_action_reason="nothing_observed",
+            )
+            return
+
+        for target_name, tweets in platform_state.items():
+            for tweet in tweets:
+                if self._should_stop():
+                    self._log("[runtime] Experiment completed mid-activation; stopping.")
+                    return
+                # Phase (and therefore the allowed action set) is re-read
+                # PER POST, not once per activation. An activation over a
+                # full feed page runs for many minutes, so a phase that
+                # transitions partway through must apply to the rest of
+                # this activation -- otherwise actions get recorded under
+                # the phase that was current when the activation started,
+                # which is exactly the attribution the phase machine exists
+                # to get right.
+                current_phase = self._current_phase()
+                self._decide_and_execute(
+                    persona_prompt, engine, tweet, target_name,
+                    current_phase, self._allowed_actions_for_phase(current_phase), observation_id,
+                )
+
+    def _decide_and_execute(
+        self, persona_prompt, engine, tweet, target_name, phase, allowed_actions, observation_id,
+    ):
+        """Prompt Construction -> Decision -> Execution -> Logging for ONE
+        observed post (paper section 3.3 stages 2-5). Shared by the Agent
+        Runtime and persona-driven cold-start, which the paper specifies run
+        the same cycle and differ only in the allowed action set.
+        """
+        experiment_context = self._build_experiment_context(allowed_actions)
+        # Cold-start passes phase="initialization" explicitly, which the
+        # orchestrator's own phase (pre_treatment) doesn't know about --
+        # keep the prompt's stated phase consistent with what gets logged.
+        experiment_context["phase"] = phase
+        recent_interactions = self.agent_state.recent_interactions(
+            limit=RECENT_INTERACTIONS_WINDOW, exclude_actions=("no_action",)
+        )
+        prompt = construct_prompt(
+            persona_prompt, tweet, target_name, experiment_context,
+            allowed_actions, recent_interactions,
+        )
+
+        decision = engine.decide(prompt)
+        action, target, no_action_reason = self._validate_decision(decision, tweet, allowed_actions)
+
+        self._log(
+            f"[runtime] Decision on tweet_id={tweet.get('tweet_id')}: "
+            f"action={action}, target_object={target}"
+            + (f", no_action_reason={no_action_reason}" if no_action_reason else "")
+        )
+        result = self._execute_agent_action(action, target)
+
+        self.agent_state.record_interaction(
+            action, target, phase=phase,
+            execution_status=result["execution_status"],
+            system_response=result["system_response"],
+        )
+        self._log_runtime_cycle(
+            observation_id, phase, prompt, decision, action, target,
+            tweet.get("tweet_id"), result, target_name=target_name,
+            no_action_reason=no_action_reason, platform_observation=tweet,
+        )
+
+        # A phase whose exit condition is max_action_count should end on the
+        # action that meets it, not up to a full tick interval later -- so
+        # check as soon as this action is on the record.
+        if action != "no_action" and self.orchestrator is not None:
+            self.orchestrator.maybe_advance_phase()
+
+        return action, target, result
+
+    def _execute_agent_action(self, action, target) -> dict:
+        """execute_action() plus ONE bounded retry for a transient failure.
+
+        Live testing (2026-09-09) saw the same tweet_id fail `retweet` with
+        a 404 and then succeed ~12 minutes later, so some failures here are
+        genuinely transient and a single attempt under-reports what the
+        agent actually managed to do.
+
+        A platform REFUSAL is never retried (see
+        PLATFORM_REFUSAL_MARKERS) -- when the platform says the request
+        looked automated, or refuses on authorization/rate-limit grounds,
+        that's a deliberate decline and retrying it would be circumventing
+        an anti-abuse control rather than recovering from an error. Each
+        attempt is logged to the engagement stream on its own, so the
+        record shows what was actually attempted.
+        """
+        result = self.execute_action(action, target)
+        for attempt in range(2, AGENT_ACTION_MAX_ATTEMPTS + 1):
+            if result["execution_status"] != "failure":
+                return result
+            reason = str((result.get("system_response") or {}).get("reason", "")).lower()
+            if any(marker in reason for marker in PLATFORM_REFUSAL_MARKERS):
+                self._log(
+                    f"[runtime] {action} on {target!r} was declined by the platform; not retrying."
+                )
+                return result
+            self._log(
+                f"[runtime] {action} on {target!r} failed transiently; "
+                f"retrying once in {AGENT_ACTION_RETRY_SECONDS}s."
+            )
+            self._sleep_interruptible(AGENT_ACTION_RETRY_SECONDS)
+            result = self.execute_action(action, target)
+        return result
 
 
 def parse_timeline(data, timeline_path):
