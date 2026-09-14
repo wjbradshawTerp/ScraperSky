@@ -1,0 +1,110 @@
+# Per-account credentials and optional per-account behavioral overrides.
+#
+# This file contains secrets (auth/bearer/csrf tokens for each X/Twitter
+# account) -- copy it to accounts.yaml and fill in real values. accounts.yaml
+# is gitignored, same as .env, and must never be committed.
+#
+# See README's Credentials section for how to extract auth_token/
+# bearer_token/csrf_token for a given account (same DevTools steps as before,
+# just once per account instead of once per repo).
+accounts:
+  - name: primary
+    auth_token: 1e5f32f9cd453a287e69cf5944f0bf58eb68deb0
+    bearer_token: "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+    csrf_token: 6d0554423a95c3ff492556b40af5d8c252425a12fbb8267290379fd24c99898586ed6016e5cf19217574dc21be55c488fcc50556f4144be1cebd3ffcf18d939b2a331bddb9d988cbfed5577a7e9ee5e2
+    # Everything below is optional. Every one of config.yaml's top-level
+    # keys can be overridden here -- platform, scroll_delay,
+    # fetch_max_retries, fetch_retry_backoff, timezone, data_collection,
+    # actions, account_lists. Any key an account doesn't set falls back to
+    # the matching key in config.yaml (dict-valued keys like
+    # data_collection/actions/account_lists merge shallowly -- e.g. an
+    # account can override just `targets` below and still inherit
+    # `search_query` from config.yaml).
+    data_collection:
+      targets:
+        - home         # For You feed (GraphQL HomeTimeline)
+        - following    # reverse-chronological Home timeline (GraphQL HomeLatestTimeline)
+        - engagement_log
+        - intervention_history
+    actions:
+      follow_all: true
+    account_lists:
+      follow_list: follow_user_ids.json
+    experiment_design:
+      experiment_name: bradshaw_action_count_test
+      treatment_arms:
+        - control
+        - treatment
+      randomization:
+        method: simple_random
+        seed: 42
+        ratios:
+          control: 0.5
+          treatment: 0.5
+      phase_durations:
+        pre_treatment:
+          max_duration: 30m
+          max_action_count: 3
+        treatment:
+          max_duration: 30m
+          max_action_count: 3
+        post_treatment:
+          max_duration: 30m
+          max_action_count: 3
+    intervention:
+      action: mute
+      target_accounts: untrustworthy_sources
+      selection_rule: random70
+      execution_time: end_of_pre_treatment
+      applies_to_arms:
+        - treatment
+
+  - name: secondary
+    auth_token: 6f21ac757adcd4765310154e0379a11d566cca31
+    bearer_token: "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+    csrf_token: d1740156975e8a1247f66914009a7a976a919ff93c5acd33ea7ee13a53b95ac528e61635d8ccfe96aad30a6ef8d008bfe499a9cc71b8eb3b2b75d7207f9df3e3c7a7e51b3cee3346a0c3507b2be8635a
+    data_collection:
+      targets:
+        - home         # For You feed (GraphQL HomeTimeline)
+        - following    # reverse-chronological Home timeline (GraphQL HomeLatestTimeline)
+        - engagement_log
+        - intervention_history
+    sockpuppet_config:
+      persona_prompt: personas/bradshaw_persona.txt
+      phase: pre_treatment
+      activation_schedule:
+        distribution: uniform
+        min_interval: 30s      # short for testing -- widen to 15m/6h once you trust it
+        max_interval: 2m
+      action_rate_limits:
+        retweet:               # sized from 2026-09-09 live data, not a documented limit
+          max_per_hour: 4      # we sustained ~6/h; 4 sits conservatively inside that
+          min_interval: 8m     # the one clear refusal followed 5 attempts in 5 minutes
+    experiment_design:
+      experiment_name: bradshaw_action_count_test
+      treatment_arms:
+        - control
+        - treatment
+      randomization:
+        method: simple_random
+        seed: 42
+        ratios:
+          control: 0.5
+          treatment: 0.5
+      phase_durations:
+        pre_treatment:
+          max_duration: 30m
+          max_action_count: 3
+        treatment:
+          max_duration: 30m
+          max_action_count: 3
+        post_treatment:
+          max_duration: 30m
+          max_action_count: 3
+    intervention:
+      action: mute
+      target_accounts: untrustworthy_sources
+      selection_rule: random70
+      execution_time: end_of_pre_treatment
+      applies_to_arms:
+        - treatment
