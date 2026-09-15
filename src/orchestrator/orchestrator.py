@@ -88,7 +88,14 @@ class ExperimentOrchestrator:
         }
 
         self._follow_lock = threading.Lock()
-        self._follow_timestamps = []
+        # Keyed per account, NOT one pooled window. X enforces the follow
+        # limit per authenticated account, so a pooled budget both wasted
+        # each account's real allowance (15/15min split N ways) and -- worse
+        # -- made one agent's follows block another's, which is interference
+        # between experimental units in exactly the quantity this study
+        # measures. Matches how sockpuppet_config.action_rate_limits already
+        # works. See ROADMAP's 2026-09-14 entry.
+        self._follow_timestamps = {}
 
         self._scrapers_lock = threading.Lock()
         self._scrapers = {}
@@ -493,24 +500,37 @@ class ExperimentOrchestrator:
         return result
 
     def acquire_follow_slot(self, account_name):
-        """Blocks until a slot is free in the shared, cross-account
-        sliding-window follow budget. Same self-throttle-ahead-of-429
-        approach as twitter.py's per-account `_throttled_follow`, but now
-        against one budget shared by every orchestrated account's thread
-        -- closes the roadmap's flagged gap ("must also respect the
-        15/15min follow rate limit across concurrently-active agents").
-        Not persisted: a restart resetting this window is a safe,
-        conservative outcome, not a correctness issue.
+        """Blocks until a slot is free in THIS account's sliding-window
+        follow budget. Same self-throttle-ahead-of-429 approach as
+        twitter.py's `_throttled_follow`, but owned by the orchestrator so
+        it covers every follow path (cold-start, follow_all, and
+        agent-runtime decisions) rather than only `_throttled_follow`'s
+        callers.
+
+        Per account, not pooled across accounts. X enforces the follow
+        limit per authenticated account, and our own data only ever
+        measured it on a single account, so a pooled window understated
+        every account's real allowance. It also let one agent's follows
+        block another's -- interference between experimental units, which
+        the causal estimate assumes away.
+
+        A restart resets the window, which is safe: it is a conservative
+        self-throttle, not a correctness-critical value.
         """
         while True:
             with self._follow_lock:
                 now = time.time()
-                self._follow_timestamps = [t for t in self._follow_timestamps if now - t < FOLLOW_RATE_WINDOW_SECONDS]
-                if len(self._follow_timestamps) < FOLLOW_RATE_LIMIT:
-                    self._follow_timestamps.append(now)
+                stamps = [
+                    t for t in self._follow_timestamps.get(account_name, [])
+                    if now - t < FOLLOW_RATE_WINDOW_SECONDS
+                ]
+                if len(stamps) < FOLLOW_RATE_LIMIT:
+                    stamps.append(now)
+                    self._follow_timestamps[account_name] = stamps
                     self.repro_log.log_scheduling_decision(account_name, "follow_slot", "granted")
                     return
-                wait = FOLLOW_RATE_WINDOW_SECONDS - (now - self._follow_timestamps[0]) + 1
+                self._follow_timestamps[account_name] = stamps
+                wait = FOLLOW_RATE_WINDOW_SECONDS - (now - stamps[0]) + 1
             # Never sleep while holding the lock -- other accounts' slot
             # checks must not block on this one's wait.
             self.repro_log.log_scheduling_decision(account_name, "follow_slot", "waited", wait_seconds=wait)

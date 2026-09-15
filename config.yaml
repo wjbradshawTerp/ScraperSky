@@ -112,6 +112,7 @@ timezone: America/New_York
 account_lists:
   follow_list: follow_user_ids.json
   untrustworthy_sources: untrustworthy_sources.json
+  trustworthy_sources: trustworthy_sources.json
 
 # sockpuppet_config.initialization_params: cold-start initialization
 # (roadmap Phase 4a). When set (here or per-account) and this account's
@@ -127,13 +128,33 @@ account_lists:
 # account_lists referenced here must already exist in the account_lists
 # map above.
 #
+# Cold-start follow candidates are a SEEDED random draw across every list
+# named in sockpuppet_config.account_lists, so the initial follow graph is
+# reproducible from the seed rather than a fresh shuffle each run. Two
+# modes:
+#   - follow_mix set: draw exactly that many from each named list. Use this
+#     when the composition matters -- e.g. how many untrustworthy sources a
+#     sockpuppet follows is a design parameter in the Mercury case study,
+#     not something that should depend on file lengths.
+#   - follow_mix omitted: draw from the pooled union of all the lists, so
+#     the mix lands proportional to their sizes.
+# max_follows caps the total either way, and must be >= min_follows.
+# The draw is namespaced per account, so each sockpuppet gets a different
+# mix that is still reproducible from the one recorded seed.
+#
 # sockpuppet_config:
 #   account_lists:
-#     - follow_list
+#     - untrustworthy_sources
+#     - trustworthy_sources
 #   initialization_params:
 #     min_follows: 15
 #     min_engagements: 15
 #     max_initialization_days: 3
+#     max_follows: 15
+#     follow_seed: 42          # optional; defaults to the experiment's randomization seed
+#     follow_mix:              # optional; omit for a proportional draw from the union
+#       untrustworthy_sources: 5
+#       trustworthy_sources: 10
 
 # sockpuppet_config.persona_prompt: enables the Agent Runtime (roadmap
 # Phase 4) -- the LLM-driven Observation -> Prompt Construction -> Decision

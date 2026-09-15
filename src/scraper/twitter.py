@@ -16,6 +16,7 @@ from runtime.decision import DecisionEngine
 from runtime.prompt import construct_prompt
 from utils.duration import parse_duration
 from utils.rate_budget import build_budgets
+from utils.seeding import seeded_rng
 
 # Naming key, since these two GraphQL operation names are easy to conflate:
 #   - `HomeTimeline`       -- X's algorithmic default feed, i.e. the "Home"
@@ -920,24 +921,122 @@ class TwitterScraper(BaseScraper):
             f"engagements={engagements_done()}/{min_engagements}"
         )
 
-    def _load_cold_start_candidates(self):
-        """Flattens and dedupes user_ids from every account list named in
-        `sockpuppet_config.account_lists`, shuffled so candidates aren't
-        always drawn in file order.
+    def _cold_start_seed(self):
+        """Base seed for the cold-start follow draw, in precedence order:
+        an explicit `initialization_params.follow_seed`, then the
+        experiment's own randomization seed (read from PERSISTED
+        orchestrator state where orchestrated, so a later config edit can't
+        change an already-run draw), then the config value, then 0.
+
+        Always resolves to something, so the draw is always reproducible
+        and the seed actually used is always logged.
         """
-        user_ids = []
+        params = self.account.initialization_params or {}
+        if params.get("follow_seed") is not None:
+            return params["follow_seed"]
+        if self.orchestrator is not None:
+            persisted = self.orchestrator.state.get_randomization_seed()
+            if persisted is not None:
+                return persisted
+        configured = (self.account.experiment_design.get("randomization") or {}).get("seed")
+        if configured is not None:
+            return configured
+        return 0
+
+    def _load_cold_start_candidates(self):
+        """Seeded random mix of user_ids drawn from the account lists named
+        in `sockpuppet_config.account_lists` (e.g. an untrustworthy-source
+        list and a trustworthy-source list).
+
+        Two modes, both reproducible from the seed:
+          - `initialization_params.follow_mix` set: draw exactly that many
+            from each named list, so the composition of the follow graph is
+            a controlled design parameter rather than a side effect of how
+            long each file happens to be.
+          - otherwise: draw from the pooled union, so the mix lands roughly
+            proportional to list sizes.
+        `initialization_params.max_follows` caps the total either way.
+
+        The draw is namespaced per account, so every sockpuppet gets a
+        DIFFERENT mix while the whole thing stays reproducible from the one
+        recorded seed -- the same approach the intervention's per-sockpuppet
+        sampling uses.
+        """
+        params = self.account.initialization_params or {}
+        by_list = OrderedDict()
         seen = set()
         for list_name in self.account.cold_start_account_lists:
             path = self.account.get_account_list_path(list_name)
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            ids = []
             for entry in data.get("users", []):
                 user_id = entry.get("user_id")
                 if user_id and user_id not in seen:
                     seen.add(user_id)
-                    user_ids.append(user_id)
-        random.shuffle(user_ids)
-        return user_ids
+                    ids.append(user_id)
+            by_list[list_name] = ids
+
+        seed = self._cold_start_seed()
+        rng = seeded_rng(seed, self.account.name, "cold_start_follows")
+        max_follows = params.get("max_follows")
+        mix = params.get("follow_mix") or {}
+
+        origin = {}
+        if mix:
+            selected = []
+            for list_name, wanted in mix.items():
+                pool = by_list.get(list_name)
+                if pool is None:
+                    raise ValueError(
+                        f"Account '{self.account.name}': initialization_params.follow_mix names "
+                        f"{list_name!r}, which is not in sockpuppet_config.account_lists "
+                        f"({list(by_list)})."
+                    )
+                take = min(int(wanted), len(pool))
+                if take < int(wanted):
+                    self._log(
+                        f"[cold-start] follow_mix wants {wanted} from {list_name!r} but it only "
+                        f"has {len(pool)}; taking {take}."
+                    )
+                drawn = rng.sample(pool, take)
+                for user_id in drawn:
+                    origin[user_id] = list_name
+                selected.extend(drawn)
+        else:
+            pool = [user_id for ids in by_list.values() for user_id in ids]
+            for list_name, ids in by_list.items():
+                for user_id in ids:
+                    origin[user_id] = list_name
+            take = len(pool) if max_follows is None else min(int(max_follows), len(pool))
+            selected = rng.sample(pool, take)
+
+        # Shuffle the combined selection so the lists aren't followed in
+        # blocks -- a run of untrustworthy follows back to back is both
+        # unrealistic and a needlessly strong automation signal.
+        rng.shuffle(selected)
+        if max_follows is not None:
+            selected = selected[: int(max_follows)]
+
+        composition = OrderedDict(
+            (name, sum(1 for user_id in selected if origin.get(user_id) == name))
+            for name in by_list
+        )
+        summary = ", ".join(f"{name}={count}" for name, count in composition.items())
+        self._log(
+            f"[cold-start] follow candidates: {len(selected)} ({summary}) "
+            f"seed={seed} mode={'follow_mix' if mix else 'pooled'}"
+        )
+        # Persisted so the realized composition is recoverable from the
+        # account's own state, not only from a console line.
+        self.agent_state.remember("cold_start_follow_draw", {
+            "seed": seed,
+            "mode": "follow_mix" if mix else "pooled",
+            "max_follows": max_follows,
+            "selected_count": len(selected),
+            "composition": dict(composition),
+        })
+        return selected
 
     def _throttled_follow(self, user_id) -> dict:
         """Self-throttles to stay under FOLLOW_RATE_LIMIT per

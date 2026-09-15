@@ -96,6 +96,54 @@ def validate_cold_start(account):
     for list_name in account.cold_start_account_lists:
         account.get_account_list_path(list_name)
 
+    max_follows = params.get("max_follows")
+    if max_follows is not None:
+        if not isinstance(max_follows, int) or max_follows < 1:
+            raise ValueError(
+                f"Account '{account.name}': initialization_params.max_follows must be a positive "
+                f"integer; got {max_follows!r}."
+            )
+        if params["min_follows"] > max_follows:
+            raise ValueError(
+                f"Account '{account.name}': initialization_params.min_follows="
+                f"{params['min_follows']} exceeds max_follows={max_follows}, so cold-start could "
+                f"never satisfy its own stopping criteria and would run until "
+                f"max_initialization_days elapsed."
+            )
+
+    mix = params.get("follow_mix")
+    if mix is not None:
+        if not isinstance(mix, dict) or not mix:
+            raise ValueError(
+                f"Account '{account.name}': initialization_params.follow_mix must be a non-empty "
+                f"mapping of account-list name to count; got {mix!r}."
+            )
+        unknown = [name for name in mix if name not in account.cold_start_account_lists]
+        if unknown:
+            raise ValueError(
+                f"Account '{account.name}': initialization_params.follow_mix names "
+                f"{unknown}, which are not in sockpuppet_config.account_lists "
+                f"({list(account.cold_start_account_lists)})."
+            )
+        for name, count in mix.items():
+            if not isinstance(count, int) or count < 0:
+                raise ValueError(
+                    f"Account '{account.name}': initialization_params.follow_mix.{name} must be a "
+                    f"non-negative integer; got {count!r}."
+                )
+        total = sum(mix.values())
+        if total == 0:
+            raise ValueError(
+                f"Account '{account.name}': initialization_params.follow_mix sums to 0 -- "
+                f"cold-start would have no accounts to follow."
+            )
+        if max_follows is not None and total > max_follows:
+            raise ValueError(
+                f"Account '{account.name}': initialization_params.follow_mix sums to {total}, "
+                f"which exceeds max_follows={max_follows}. Lower the mix or raise max_follows -- "
+                f"silently trimming would break the composition the mix exists to guarantee."
+            )
+
     min_follows = params["min_follows"]
     max_days = params["max_initialization_days"]
     max_reachable = FOLLOWS_PER_DAY * max_days

@@ -1,5 +1,7 @@
 import random
 
+from utils.seeding import seeded_rng as _seeded_rng
+
 
 def assign_treatment_arms(account_names, arms, ratios, seed) -> dict:
     """Deterministic, seeded, exact-ratio treatment-arm assignment.
@@ -40,11 +42,7 @@ def assign_treatment_arms(account_names, arms, ratios, seed) -> dict:
     return assignments
 
 
-def seeded_rng(seed, *namespace_parts) -> random.Random:
-    """A Random instance seeded deterministically from the experiment seed
-    plus a namespace (e.g. account_name, "intervention") -- so different
-    uses of randomness within one experiment (treatment assignment vs.
-    intervention target sampling) don't share a draw sequence.
-    """
-    key = "|".join([str(seed)] + [str(part) for part in namespace_parts])
-    return random.Random(key)
+# Re-exported from utils.seeding so there is exactly one implementation --
+# cold-start follow selection needs it too, and a scraper importing from
+# the orchestrator package would invert the dependency.
+seeded_rng = _seeded_rng

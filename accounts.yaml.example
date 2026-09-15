@@ -92,6 +92,7 @@ accounts:
   #   account_lists:
   #     follow_list: follow_user_ids.json             # consumed by follow_all()
   #     untrustworthy_sources: untrustworthy.json     # e.g. referenced by sockpuppet_config below
+  #     trustworthy_sources: trustworthy_sources.json # e.g. referenced by sockpuppet_config below
   #     prominent_news_sources: news_sources.json     # e.g. referenced by sockpuppet_config below
   #
   #   # --- sockpuppet_config: cold-start initialization + Agent Runtime ---
@@ -103,6 +104,22 @@ accounts:
   #       min_follows: 15                   # stop following once at least this many accounts are followed
   #       min_engagements: 15                # stop liking/reposting once at least this many engagement events are recorded
   #       max_initialization_days: 3         # give up after this many days even if criteria above aren't met
+  #       max_follows: 15                    # cap on cold-start follows. Must be >= min_follows, or cold-start
+  #                                           # could never satisfy its own stopping criteria (validated at startup).
+  #       follow_seed: 42                    # optional. Makes the follow draw reproducible. Precedence:
+  #                                           # this -> the experiment's PERSISTED randomization seed -> the
+  #                                           # configured randomization seed -> 0. The seed actually used is
+  #                                           # logged and stored in agent_state.internal_memory.
+  #       follow_mix:                        # optional. Draw exactly this many from each named account_list,
+  #         untrustworthy_sources: 5          # making the follow graph's composition a controlled design
+  #         trustworthy_sources: 10           # parameter. OMIT to draw from the pooled union instead, which
+  #                                           # lands proportional to how long each file happens to be --
+  #                                           # usually NOT what you want when exposure to one list is the
+  #                                           # thing being measured. Names must appear in
+  #                                           # sockpuppet_config.account_lists; the total must not exceed
+  #                                           # max_follows (both validated at startup).
+  #                                           # The draw is namespaced per account, so every sockpuppet gets a
+  #                                           # different mix while staying reproducible from the one seed.
   #     persona_prompt: personas/example_persona.txt   # path to a persona text file -- enables Agent Runtime mode (roadmap Phase 4) when set.
   #                                           # Also makes cold-start persona-driven: initialization runs the same
   #                                           # decision cycle, restricted to follow/like/repost (no mute).

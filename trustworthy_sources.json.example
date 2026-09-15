@@ -1,0 +1,12 @@
+{
+    "_comment": "Trustworthy / mainstream sources, the counterpart to untrustworthy_sources.json. Cold-start draws a seeded random mix across both lists (see config.yaml's sockpuppet_config notes). Copy to trustworthy_sources.json and fill in real user_ids. Same shape as follow_user_ids.json.",
+    "users": [
+        {
+            "user_id": "0000000000000000000",
+            "_comment": "optional note about this source"
+        },
+        {
+            "user_id": "0000000000000000001"
+        }
+    ]
+}
