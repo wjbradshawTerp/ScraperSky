@@ -1,0 +1,568 @@
+{
+  "persona_prompt": "PROFILE SUMMARY\nYou are a synthetic social media user in a research study. You enjoy video fighting\ngames, like Street Fighter and Guilty Gear. You also like science articles, particularly\nones about computer science or animals. However, you do not care for posts\nregarding art, whether that be old classical art or modern art.\n\nBEHAVIORAL TENDENCIES\nYou repost content related to video fighting games, even if the account\nis unfamiliar and has a low follower account. You almost always mute a user that posts\nart. If an account posts about video fighting games and they have over 1000 followers,\nyou are quite likely to follow them.",
+  "account_metadata": {
+    "agent_id": "primary",
+    "account_name": "primary",
+    "platform": "twitter",
+    "experiment_id": "bradshaw_action_count_test::primary",
+    "observation_targets": [
+      "home",
+      "following"
+    ]
+  },
+  "following_list": [
+    "155659213",
+    "1178432333764009989",
+    "1614109226560798720",
+    "1144394265679843328",
+    "1027214104661028864",
+    "2026838499870257156",
+    "1622468827756773378",
+    "907975864360501248",
+    "1551261351347109888",
+    "1480344949380026369"
+  ],
+  "muted_accounts": [
+    "1614109226560798720",
+    "1554388035466174464",
+    "3002445879",
+    "1987860814674718721",
+    "1129408720293847041",
+    "907975864360501248",
+    "1551261351347109888",
+    "1759165487102169088",
+    "1713055176041381888",
+    "1027214104661028864"
+  ],
+  "liked_tweets": [],
+  "retweeted_tweets": [
+    "2099157541288628711"
+  ],
+  "interaction_history": [
+    {
+      "action": "mute",
+      "target": "1614109226560798720",
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:18:35.056062+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:18:52.712259+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:19:24.551140+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:19:35.410510+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:19:47.609015+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:20:06.882941+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:20:24.511984+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:20:43.937462+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:21:04.511768+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:21:44.000673+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:22:31.784694+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "mute",
+      "target": "1554388035466174464",
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:23:15.696145+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "mute",
+      "target": "3002445879",
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:23:51.046009+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:24:57.028116+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:25:31.699821+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "mute",
+      "target": "1987860814674718721",
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:26:12.972292+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "mute",
+      "target": "1129408720293847041",
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:27:00.952481+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:27:49.576772+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:28:34.938753+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:29:28.027413+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:30:17.912342+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:31:01.215892+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "retweet",
+      "target": "2099157541288628711",
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:31:59.072419+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:33:07.985036+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "mute",
+      "target": "907975864360501248",
+      "phase": "intervention",
+      "timestamp_utc": "2026-09-14T20:33:12.141816+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "mute",
+      "target": "1551261351347109888",
+      "phase": "intervention",
+      "timestamp_utc": "2026-09-14T20:33:12.396744+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "mute",
+      "target": "1759165487102169088",
+      "phase": "intervention",
+      "timestamp_utc": "2026-09-14T20:33:12.618086+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "pre_treatment",
+      "timestamp_utc": "2026-09-14T20:33:52.110833+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:34:33.984455+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "mute",
+      "target": "1713055176041381888",
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:35:11.445064+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:35:43.784921+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:36:20.912105+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "mute",
+      "target": "1027214104661028864",
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:36:56.115938+00:00",
+      "execution_status": "success",
+      "system_response": {
+        "status_code": 200,
+        "reason": "OK"
+      }
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:37:38.993988+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:38:17.751288+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:38:58.238491+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:39:47.347132+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:40:37.064614+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:41:08.292241+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:41:50.088547+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:42:40.235261+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:43:41.019804+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:44:15.314871+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:44:49.775061+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:45:19.085495+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:45:58.911680+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:46:52.208226+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:47:25.992808+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "treatment",
+      "timestamp_utc": "2026-09-14T20:48:17.292624+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:49:07.381551+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:50:16.056782+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:51:02.315888+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:52:18.509489+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:53:29.119999+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:54:06.421889+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:54:51.940235+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:55:24.609084+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:55:56.172098+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:56:49.077403+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:57:31.809306+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:58:09.977314+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:58:52.870562+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T20:59:34.156092+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T21:00:05.468344+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T21:00:50.480735+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T21:01:26.976631+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T21:02:25.369212+00:00",
+      "execution_status": "skipped"
+    },
+    {
+      "action": "no_action",
+      "target": null,
+      "phase": "post_treatment",
+      "timestamp_utc": "2026-09-14T21:03:28.408218+00:00",
+      "execution_status": "skipped"
+    }
+  ],
+  "initialization_progress": {
+    "completed": false,
+    "completed_at": null
+  },
+  "internal_memory": {}
+}

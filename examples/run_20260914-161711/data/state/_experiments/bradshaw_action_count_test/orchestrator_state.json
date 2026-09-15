@@ -1,0 +1,36 @@
+{
+  "experiment_name": "bradshaw_action_count_test",
+  "created_at": "2026-09-14T20:17:11.640497+00:00",
+  "randomization_seed": 42,
+  "phase": "post_treatment",
+  "phase_entered_at": "2026-09-14T20:48:12.649643+00:00",
+  "participating_accounts": [
+    "primary",
+    "secondary"
+  ],
+  "treatment_assignments": {
+    "secondary": "control",
+    "primary": "treatment"
+  },
+  "interventions": {
+    "primary": {
+      "status": "completed",
+      "executed_at": "2026-09-14T20:33:12.649772+00:00",
+      "results": [
+        {
+          "target": "907975864360501248",
+          "execution_status": "success"
+        },
+        {
+          "target": "1551261351347109888",
+          "execution_status": "success"
+        },
+        {
+          "target": "1759165487102169088",
+          "execution_status": "success"
+        }
+      ]
+    }
+  },
+  "experiment_status": "completed"
+}
