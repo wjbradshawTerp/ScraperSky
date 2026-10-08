@@ -161,15 +161,19 @@ class AgentState:
             for e in self.interaction_history
         )
 
-    def recent_interactions(self, limit=10, exclude_actions=None) -> list:
+    def recent_interactions(self, limit=10, exclude_actions=None, exclude_phases=None) -> list:
         """The most recent `limit` interaction_history entries (oldest
         first), optionally dropping actions that add no useful "don't
         repeat this" context -- e.g. `exclude_actions=("no_action",)`,
-        since there's nothing to avoid repeating about doing nothing.
+        since there's nothing to avoid repeating about doing nothing --
+        and entries from given phases (e.g. the orchestrator's
+        `"intervention"` mutes, hidden from a blinded prompt).
         """
         entries = self.interaction_history
         if exclude_actions:
             entries = [e for e in entries if e.get("action") not in exclude_actions]
+        if exclude_phases:
+            entries = [e for e in entries if e.get("phase") not in exclude_phases]
         return entries[-limit:]
 
     def is_initialization_complete(self) -> bool:

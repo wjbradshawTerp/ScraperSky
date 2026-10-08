@@ -7,6 +7,14 @@ accounts.yaml
 # the shape. (follow_user_ids.json is committed -- it's just a follow list,
 # it makes no claim about the accounts in it.)
 untrustworthy_sources.json
+# Backups of accounts.yaml carry the same live credentials as the original.
+accounts.yaml.bak*
+# Mercury case-study inventories -- same reason: they label named real
+# accounts as untrustworthy (news_sources.json is ignored alongside them so
+# the case study's lists stay together, local-only).
+untrustworthy.json
+untrustworthy_top434.json
+news_sources.json
 
 data/*
 !data/.gitkeep

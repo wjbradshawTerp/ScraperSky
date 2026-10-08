@@ -13,7 +13,7 @@ from config import settings
 from storage.file_manager import FileManager
 from storage.agent_state import AgentState
 from runtime.decision import DecisionEngine
-from runtime.prompt import construct_prompt
+from runtime.prompt import BLINDED_INTERACTION_PHASES, blind_experiment_context, construct_prompt
 from utils.duration import parse_duration
 from utils.rate_budget import build_budgets
 from utils.seeding import seeded_rng
@@ -1391,7 +1391,7 @@ class TwitterScraper(BaseScraper):
     def _log_runtime_cycle(
         self, observation_id, phase, prompt, decision, action, target,
         observed_tweet_id, result, target_name=None, no_action_reason=None,
-        platform_observation=None,
+        platform_observation=None, experiment_context=None, prompt_blinded=False,
     ):
         """Logging stage (roadmap Phase 4, paper section 3.3 stage 5 /
         section 4 runtime_log schema). `data_collection.logging: minimal`
@@ -1412,6 +1412,12 @@ class TwitterScraper(BaseScraper):
         "rate_capped" (downgraded, pacing budget exhausted), and
         "nothing_observed" (no post to decide on at all) -- always present
         when `action == "no_action"`, always None otherwise.
+
+        `experiment_context` is the full, unblinded context for this
+        decision, logged even when `experiment_design.blind_prompt` kept
+        parts of it out of the prompt itself (`prompt_blinded`), so the
+        record of each decision's condition never depends on what the
+        model was shown.
         """
         entry = {
             # `log_id` uniquely identifies this runtime_log row (paper
@@ -1428,6 +1434,8 @@ class TwitterScraper(BaseScraper):
             "selected_action": action,
             "target_object": target,
             "no_action_reason": no_action_reason,
+            "experiment_context": experiment_context,
+            "prompt_blinded": prompt_blinded,
             "execution_result": result,
             "execution_status": result["execution_status"],
             "system_response": result["system_response"],
@@ -1595,11 +1603,14 @@ class TwitterScraper(BaseScraper):
         # orchestrator's own phase (pre_treatment) doesn't know about --
         # keep the prompt's stated phase consistent with what gets logged.
         experiment_context["phase"] = phase
+        blind = self.account.blind_prompt
         recent_interactions = self.agent_state.recent_interactions(
-            limit=RECENT_INTERACTIONS_WINDOW, exclude_actions=("no_action",)
+            limit=RECENT_INTERACTIONS_WINDOW, exclude_actions=("no_action",),
+            exclude_phases=BLINDED_INTERACTION_PHASES if blind else None,
         )
         prompt = construct_prompt(
-            persona_prompt, tweet, target_name, experiment_context,
+            persona_prompt, tweet, target_name,
+            blind_experiment_context(experiment_context) if blind else experiment_context,
             allowed_actions, recent_interactions,
         )
 
@@ -1622,6 +1633,7 @@ class TwitterScraper(BaseScraper):
             observation_id, phase, prompt, decision, action, target,
             tweet.get("tweet_id"), result, target_name=target_name,
             no_action_reason=no_action_reason, platform_observation=tweet,
+            experiment_context=experiment_context, prompt_blinded=blind,
         )
 
         # A phase whose exit condition is max_action_count should end on the
@@ -1761,17 +1773,56 @@ def _unwrap_tweet_result(result):
     return result
 
 
-def build_tweet_object(tweet):
-    legacy = tweet.get("legacy", {})
-    retweeted_status = legacy.get("retweeted_status_result", {}).get("result")
-    user = tweet.get("core", {}).get("user_results", {}).get("result", {})
+def _author_of(tweet) -> dict:
+    user = (tweet or {}).get("core", {}).get("user_results", {}).get("result", {})
     # X has moved some UserResults fields (name/screen_name) out of `legacy`
     # and into `core` over time, without a clean cutover -- check both so
     # this keeps working regardless of which shape a given response uses.
     user_legacy = user.get("legacy", {})
     user_core = user.get("core", {})
+    return {
+        "user_id": user.get("rest_id"),
+        "username": user_core.get("screen_name") or user_legacy.get("screen_name"),
+        "display_name": user_core.get("name") or user_legacy.get("name"),
+        "followers": user_legacy.get("followers_count")
+        or user.get("relationship_counts", {}).get("followers", 0),
+    }
+
+
+def _referenced_tweet(tweet, fallback_id=None):
+    """{tweet_id, author} for a retweeted/quoted tweet, or None if there
+    isn't one. A tombstoned reference (deleted/withheld) still yields its
+    id when the referencing tweet's legacy carries it, with author None --
+    the reference existed even if its author can't be resolved.
+    """
+    if tweet:
+        return {"tweet_id": tweet.get("rest_id"), "author": _author_of(tweet)}
+    if fallback_id:
+        return {"tweet_id": fallback_id, "author": None}
+    return None
+
+
+def build_tweet_object(tweet):
+    """`author` is whoever's post this is in the feed -- the RETWEETER for a
+    retweet, since that's the account follow/mute decisions target (see
+    `_resolve_target`). The original author of a retweet, and the author of
+    a quoted tweet, are kept separately under `retweeted_tweet`/
+    `quoted_tweet`, so feed posts can be classified against an agent's
+    muted (or counterfactual) list by whoever actually wrote the content.
+    """
+    legacy = tweet.get("legacy", {})
+    # Unwrapped like the top-level result: a retweet of a sensitive tweet
+    # nests it under TweetWithVisibilityResults, which previously lost the
+    # retweeted text entirely.
+    retweeted_status = _unwrap_tweet_result(legacy.get("retweeted_status_result", {}).get("result"))
+    is_retweet = "retweeted_status_result" in legacy or bool(legacy.get("retweeted_status_id_str"))
 
     src = retweeted_status.get("legacy", {}) if retweeted_status else legacy
+    # A retweet of a quote tweet carries the quote on the retweeted tweet,
+    # not the retweet wrapper -- read it from whichever node holds the content.
+    content_node = retweeted_status or tweet
+    quoted_status = _unwrap_tweet_result(content_node.get("quoted_status_result", {}).get("result"))
+    is_quote = bool(src.get("is_quote_status")) or quoted_status is not None
 
     return {
         "tweet_id": tweet.get("rest_id"),
@@ -1785,11 +1836,15 @@ def build_tweet_object(tweet):
             "quotes": src.get("quote_count", 0),
             "bookmarks": src.get("bookmark_count", 0),
         },
-        "author": {
-            "user_id": user.get("rest_id"),
-            "username": user_core.get("screen_name") or user_legacy.get("screen_name"),
-            "display_name": user_core.get("name") or user_legacy.get("name"),
-            "followers": user_legacy.get("followers_count")
-            or user.get("relationship_counts", {}).get("followers", 0),
-        },
+        "author": _author_of(tweet),
+        "is_retweet": is_retweet,
+        "is_quote": is_quote,
+        "retweeted_tweet": (
+            _referenced_tweet(retweeted_status, legacy.get("retweeted_status_id_str"))
+            if is_retweet else None
+        ),
+        "quoted_tweet": (
+            _referenced_tweet(quoted_status, src.get("quoted_status_id_str"))
+            if is_quote else None
+        ),
     }

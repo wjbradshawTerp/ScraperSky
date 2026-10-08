@@ -362,18 +362,18 @@ class ExperimentOrchestrator:
     def _sync_pending_interventions(self):
         """Marks pending (and immediately attempts to run) the
         intervention for every participating account whose
-        `intervention.trigger_phase` matches the current phase and whose
-        treatment arm is in `applies_to_arms`. Safe to call repeatedly --
-        `mark_intervention_pending`/`claim_intervention` are both
-        idempotent, so a re-tick never re-triggers a completed
+        `intervention.trigger_phase` matches the current phase -- in EVERY
+        arm, not just `applies_to_arms`. Accounts outside those arms get
+        their target set drawn but not executed (see _run_intervention), so
+        control agents carry a counterfactual list too. Safe to call
+        repeatedly -- `mark_intervention_pending`/`claim_intervention` are
+        both idempotent, so a re-tick never re-triggers a completed
         intervention.
         """
         phase = self.state.get_phase()
         for account_name in self.state.get_participating_accounts():
             intervention_cfg = self.intervention_by_account.get(account_name)
             if not intervention_cfg or intervention_cfg.get("trigger_phase") != phase:
-                continue
-            if self.state.get_treatment_arm(account_name) not in (intervention_cfg.get("applies_to_arms") or []):
                 continue
             self.state.mark_intervention_pending(account_name)
             self._maybe_run_now(account_name)
@@ -431,9 +431,32 @@ class ExperimentOrchestrator:
             data = json.load(f)
         user_ids = [entry["user_id"] for entry in data.get("users", []) if entry.get("user_id")]
 
+        selection_method = intervention_cfg.get("selection_method", "simple")
+
         rng = randomization.seeded_rng(self.state.get_randomization_seed(), account_name, "intervention")
-        sample_size = min(round(len(user_ids) * fraction), len(user_ids))
-        sampled = rng.sample(user_ids, sample_size)
+        if selection_method == "stratified":
+            # The target list's order is the stratification key, so the
+            # list file must already be sorted (see build_untrustworthy_sources.py).
+            sampled = randomization.stratified_sample(
+                user_ids, fraction, rng, stratum_size=spec.STRATUM_SIZE
+            )
+        else:
+            sample_size = min(round(len(user_ids) * fraction), len(user_ids))
+            sampled = rng.sample(user_ids, sample_size)
+
+        # Mercury drew every participant's muting set BEFORE treatment
+        # assignment and only executed it for treatment participants, so
+        # control participants' feeds can be split into "would have been
+        # muted" vs. not, on the same terms as treatment. The draw above
+        # depends only on (seed, account_name) -- never on the arm -- so
+        # drawing here, after assignment, yields exactly the set a
+        # pre-assignment draw would have. Only execution is arm-gated.
+        executed = self.state.get_treatment_arm(account_name) in (intervention_cfg.get("applies_to_arms") or [])
+        if not executed:
+            self._record_counterfactual_intervention(
+                account_name, scraper, action, list_name, fraction, selection_method, sampled,
+            )
+            return
 
         results = []
         for user_id in sampled:
@@ -459,23 +482,56 @@ class ExperimentOrchestrator:
         self.state.complete_intervention(account_name, results)
         agent_id = self.agent_id_by_account.get(account_name, account_name)
         self.repro_log.log_intervention_execution(
-            account_name, action, list_name, fraction, results, agent_id=agent_id
+            account_name, action, list_name, fraction, results, agent_id=agent_id,
+            selection_method=selection_method, counterfactual=False,
         )
         # Intervention History is one of the paper's own data streams
         # (section 4), written per-account alongside that account's
         # observations rather than only into the experiment-wide
         # reproducibility log.
-        scraper.write_intervention_history({
+        scraper.write_intervention_history(self._intervention_history_record(
+            account_name, action, list_name, fraction, selection_method, results, counterfactual=False,
+        ))
+
+    def _record_counterfactual_intervention(
+        self, account_name, scraper, action, list_name, fraction, selection_method, sampled,
+    ):
+        """Records the drawn-but-not-executed target set for an account
+        outside `applies_to_arms`. No platform call, and nothing written to
+        the agent's interaction_history -- the agent's own state stays
+        exactly as if no intervention existed. Each target is marked
+        `execution_status: "not_executed"` so the same `results` shape
+        serves both arms in analysis.
+        """
+        results = [{"target": user_id, "execution_status": "not_executed"} for user_id in sampled]
+        self.state.complete_intervention(account_name, results, counterfactual=True)
+        self.repro_log.log_intervention_execution(
+            account_name, action, list_name, fraction, results,
+            agent_id=self.agent_id_by_account.get(account_name, account_name),
+            selection_method=selection_method, counterfactual=True,
+        )
+        scraper.write_intervention_history(self._intervention_history_record(
+            account_name, action, list_name, fraction, selection_method, results, counterfactual=True,
+        ))
+
+    def _intervention_history_record(
+        self, account_name, action, list_name, fraction, selection_method, results, counterfactual,
+    ) -> dict:
+        return {
             "experiment_id": f"{self.experiment_name}::{account_name}",
-            "agent_id": agent_id,
+            "agent_id": self.agent_id_by_account.get(account_name, account_name),
             "phase": self.state.get_phase(),
             "treatment_arm": self.state.get_treatment_arm(account_name),
             "action": action,
             "target_accounts": list_name,
             "selection_fraction": fraction,
+            "selection_method": selection_method,
+            # True for an arm outside applies_to_arms: the set was drawn by
+            # the same seeded procedure but never executed on the platform.
+            "counterfactual": counterfactual,
             "target_count": len(results),
             "results": results,
-        })
+        }
 
     @staticmethod
     def _execute_intervention_target(scraper, action, target, max_attempts=4, base_backoff_seconds=5):

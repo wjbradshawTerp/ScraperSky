@@ -199,10 +199,14 @@ class ExperimentState:
             self._save()
             return True
 
-    def complete_intervention(self, account_name, results):
+    def complete_intervention(self, account_name, results, counterfactual=False):
+        """`counterfactual=True` records a drawn-but-not-executed target set
+        (an arm outside `applies_to_arms`) under its own terminal status, so
+        the state file never claims a control account was intervened on.
+        """
         with self._lock:
             self.interventions[account_name] = {
-                "status": "completed",
+                "status": "counterfactual" if counterfactual else "completed",
                 "executed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "results": results,
             }

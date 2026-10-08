@@ -42,6 +42,40 @@ def assign_treatment_arms(account_names, arms, ratios, seed) -> dict:
     return assignments
 
 
+def stratified_sample(ordered_ids, fraction, rng, stratum_size=10) -> list:
+    """Stratified draw over an already-ordered list.
+
+    The list's order is the stratification key: it is cut into consecutive
+    blocks of `stratum_size`, and floor(stratum_size * fraction) ids are
+    drawn from every full block. The shortfall against the overall target
+    (round(len * fraction)) is then drawn from the leftover partial block
+    first, and only if that is too small, from the not-yet-drawn ids of the
+    full blocks. E.g. 434 ids at 0.7 -> 43 blocks x 7 = 301, plus 3 of the
+    last 4 = 304.
+    """
+    ids = list(ordered_ids)
+    target = min(round(len(ids) * fraction), len(ids))
+    per_block = int(stratum_size * fraction)
+    num_blocks = len(ids) // stratum_size
+
+    sampled = []
+    for j in range(num_blocks):
+        block = ids[j * stratum_size:(j + 1) * stratum_size]
+        sampled.extend(rng.sample(block, per_block))
+
+    shortfall = target - len(sampled)
+    if shortfall > 0:
+        leftover = ids[num_blocks * stratum_size:]
+        extra = rng.sample(leftover, min(shortfall, len(leftover)))
+        sampled.extend(extra)
+        shortfall -= len(extra)
+    if shortfall > 0:
+        chosen = set(sampled)
+        pool = [uid for uid in ids if uid not in chosen]
+        sampled.extend(rng.sample(pool, shortfall))
+    return sampled
+
+
 # Re-exported from utils.seeding so there is exactly one implementation --
 # cold-start follow selection needs it too, and a scraper importing from
 # the orchestrator package would invert the dependency.

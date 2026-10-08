@@ -207,7 +207,7 @@ def validate_experiment_orchestration(accounts):
     most one experiment is supported per process (one accounts.yaml, one
     orchestrator instance) -- reject a config naming more than one, or
     where opted-in accounts disagree on the experiment-wide
-    `randomization`/`phase_durations` values (a likely copy-paste mistake,
+    `randomization`/`phase_durations`/`blind_prompt` values (a likely copy-paste mistake,
     since those apply to the whole experiment, not per-account).
 
     Returns the list of opted-in accounts (empty if none), so main() can
@@ -242,6 +242,14 @@ def validate_experiment_orchestration(accounts):
         if account.experiment_design.get("phase_durations") != first.experiment_design.get("phase_durations"):
             raise ValueError(
                 f"Account '{account.name}': experiment_design.phase_durations must match every other "
+                f"opted-in account's -- it's experiment-wide, not per-account."
+            )
+        # Blinding some agents but not others would make prompt content
+        # itself differ across units -- the very confound blind_prompt exists
+        # to remove.
+        if account.blind_prompt != first.blind_prompt:
+            raise ValueError(
+                f"Account '{account.name}': experiment_design.blind_prompt must match every other "
                 f"opted-in account's -- it's experiment-wide, not per-account."
             )
 

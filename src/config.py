@@ -132,6 +132,17 @@ class Account:
         return self.sockpuppet_config.get("action_rate_limits") or {}
 
     @property
+    def blind_prompt(self) -> bool:
+        """`experiment_design.blind_prompt`: withhold the condition from the
+        decision prompt -- experiment_id/phase/treatment_arm/
+        intervention_status, and intervention actions in YOUR RECENT
+        ACTIONS -- so the intervention itself is the only difference
+        between arms (see runtime/prompt.py's BLINDED_CONTEXT_KEYS). Off by
+        default; logs and observation headers record all of it either way.
+        """
+        return bool(self.experiment_design.get("blind_prompt", False))
+
+    @property
     def randomization_method(self) -> str:
         return (self.experiment_design.get("randomization") or {}).get("method")
 

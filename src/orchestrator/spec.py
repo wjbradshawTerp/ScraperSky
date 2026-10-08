@@ -33,26 +33,46 @@ EXECUTION_TIME_TO_PHASE = {
 ADAPTIVE_PHASE_DURATION = "adaptive"
 
 
-def parse_selection_rule(selection_rule) -> float:
-    """`random70` -> 0.7, `all` -> 1.0 (paper section 3.1: "all candidate
-    accounts may be selected, or a fixed proportion (e.g., 70%) may be
-    randomly sampled independently for each sockpuppet").
-    """
+# Selection-rule prefixes -> sampling method. `randomNN` draws a simple
+# random NN% of the target list; `stratifiedNN` treats the list's own order
+# as the stratification key, splits it into consecutive blocks of
+# STRATUM_SIZE and draws NN% of every block, so the sample is spread evenly
+# along whatever the list was sorted by (e.g. followed_by / total_engagement).
+SELECTION_METHOD_PREFIXES = {"random": "simple", "stratified": "stratified"}
+STRATUM_SIZE = 10
+
+
+def _split_selection_rule(selection_rule):
     if selection_rule is None:
         raise ValueError(
-            "intervention.selection_rule is required -- e.g. 'random70' for a random 70%, or 'all'."
+            "intervention.selection_rule is required -- e.g. 'random70' for a random 70%, "
+            "'stratified70' for 70% of every block of 10, or 'all'."
         )
     text = str(selection_rule).strip().lower()
     if text == "all":
-        return 1.0
-    if text.startswith("random"):
-        digits = text[len("random"):]
-        if digits.isdigit() and 0 <= int(digits) <= 100:
-            return int(digits) / 100.0
+        return "all", 1.0
+    for prefix, method in SELECTION_METHOD_PREFIXES.items():
+        if text.startswith(prefix):
+            digits = text[len(prefix):]
+            if digits.isdigit() and 0 <= int(digits) <= 100:
+                return method, int(digits) / 100.0
     raise ValueError(
-        f"Unsupported intervention.selection_rule {selection_rule!r}; expected 'all' "
-        f"or 'randomNN' (e.g. 'random70')."
+        f"Unsupported intervention.selection_rule {selection_rule!r}; expected 'all', "
+        f"'randomNN' (e.g. 'random70') or 'stratifiedNN' (e.g. 'stratified70')."
     )
+
+
+def parse_selection_rule(selection_rule) -> float:
+    """`random70` / `stratified70` -> 0.7, `all` -> 1.0 (paper section 3.1:
+    "all candidate accounts may be selected, or a fixed proportion (e.g.,
+    70%) may be randomly sampled independently for each sockpuppet").
+    """
+    return _split_selection_rule(selection_rule)[1]
+
+
+def parse_selection_method(selection_rule) -> str:
+    """`random70` -> 'simple', `stratified70` -> 'stratified', `all` -> 'all'."""
+    return _split_selection_rule(selection_rule)[0]
 
 
 def parse_execution_time(execution_time) -> str:
@@ -88,7 +108,8 @@ def parse_randomization_method(method) -> str:
 
 def parse_intervention(intervention_cfg) -> dict:
     """Normalizes the paper's `intervention` namespace into
-    {action, target_accounts, fraction, trigger_phase, applies_to_arms}.
+    {action, target_accounts, fraction, selection_method, trigger_phase,
+    applies_to_arms}.
 
     Returns None for an empty/absent config (an account with no
     intervention configured, e.g. every control-arm-only deployment).
@@ -124,6 +145,7 @@ def parse_intervention(intervention_cfg) -> dict:
         "action": action,
         "target_accounts": target_accounts,
         "fraction": parse_selection_rule(intervention_cfg.get("selection_rule")),
+        "selection_method": parse_selection_method(intervention_cfg.get("selection_rule")),
         "trigger_phase": parse_execution_time(intervention_cfg.get("execution_time")),
         "applies_to_arms": list(applies_to_arms),
     }

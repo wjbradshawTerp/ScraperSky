@@ -55,6 +55,27 @@ def _format_tweet(tweet: dict) -> str:
     )
 
 
+# experiment_context fields withheld from the model under
+# `experiment_design.blind_prompt`. treatment_arm/intervention_status name
+# the condition outright; phase names ("treatment", "post_treatment") cue it
+# almost as directly, and the model only needs the phase for its allowed
+# action set, which ALLOWED ACTIONS already carries. experiment_id embeds
+# experiment_name (e.g. "mercury_muting"), which would prime every arm
+# toward the very behavior being measured. All of these still reach the
+# logs -- this only changes what the model sees.
+BLINDED_CONTEXT_KEYS = ("experiment_id", "phase", "treatment_arm", "intervention_status")
+
+# interaction_history phases left out of YOUR RECENT ACTIONS when blinded:
+# the orchestrator records every intervention mute there, so treatment
+# agents would otherwise see a run of "mute on ..." entries that control
+# agents never do (and that contradict a "never mute" persona).
+BLINDED_INTERACTION_PHASES = ("intervention",)
+
+
+def blind_experiment_context(context: dict) -> dict:
+    return {key: value for key, value in context.items() if key not in BLINDED_CONTEXT_KEYS}
+
+
 def format_experiment_context(context: dict) -> str:
     return "\n".join(f"{key}: {value}" for key, value in context.items())
 

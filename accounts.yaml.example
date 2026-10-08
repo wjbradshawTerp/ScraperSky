@@ -154,6 +154,10 @@ accounts:
   #       ratios:                            # must sum to 1.0 across every arm above; omit for an even split
   #         control: 0.5
   #         treatment: 0.5
+  #     blind_prompt: true                   # keep the condition out of the decision prompt: no experiment_id/phase/
+  #                                           # treatment_arm/intervention_status, and no intervention mutes in
+  #                                           # YOUR RECENT ACTIONS. Logs still record all of it. Must match across
+  #                                           # opted-in accounts; default false
   #     recovery_policy:                     # how an account recovers from a failed activation
   #       max_consecutive_failures: 5        # give up on this account after this many in a row (default 5)
   #       backoff: 1m                        # wait after the first failure, doubled per consecutive failure
@@ -173,14 +177,18 @@ accounts:
   #
   #   # --- intervention: orchestrator-triggered bulk action (paper section 3.1) ---
   #   # Only read for accounts with experiment_design.treatment_arms set above. Fires exactly
-  #   # once, at execution_time, for every account whose treatment arm is in applies_to_arms --
-  #   # reuses execute_action(), the same dispatcher the Agent Runtime and cold-start already
-  #   # use, not a separate action path. Every target gets a real attempt (retried with
-  #   # backoff), and the phase won't advance until the whole intervention has finished.
+  #   # once, at execution_time, for every opted-in account: the target set is drawn for every
+  #   # arm, but only executed for arms in applies_to_arms (others are recorded as
+  #   # counterfactual). Execution reuses execute_action(), the same dispatcher the Agent
+  #   # Runtime and cold-start already use, not a separate action path. Every target gets a
+  #   # real attempt (retried with backoff), and the phase won't advance until the whole
+  #   # intervention has finished.
   #   intervention:
   #     action: mute                         # any execute_action() action
   #     target_accounts: untrustworthy_sources       # a name from account_lists above
-  #     selection_rule: random70             # `all`, or randomNN for a random NN% sampled per sockpuppet
+  #     selection_rule: random70             # `all`, randomNN for a simple random NN% sampled per sockpuppet, or
+  #                                           # stratifiedNN (e.g. stratified70) for NN% of every consecutive block
+  #                                           # of 10 in the list file's own order (the file must already be sorted)
   #     execution_time: end_of_pre_treatment # end_of_pre_treatment (as `treatment` begins) or end_of_treatment
-  #     applies_to_arms:                     # which treatment_arms values above receive this intervention
-  #       - treatment
+  #     applies_to_arms:                     # which treatment_arms values above have it executed; every other
+  #       - treatment                        # arm's draw is recorded as counterfactual, not executed

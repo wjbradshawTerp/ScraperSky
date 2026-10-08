@@ -1,0 +1,72 @@
+# Mercury muting case study -- replicates the original Mercury muting
+# procedure as closely as possible. Run with CONFIG_PATH=config.mercury.yaml
+# (in .env for docker compose). Every key is documented in config.yaml; only
+# the values that differ from its defaults matter here.
+#
+# The three account lists below are gitignored (they label named real
+# accounts as untrustworthy) and must be present locally in the repo root.
+
+platform: twitter
+
+data_collection:
+  targets:
+    - home
+    # Both streams are needed for analysis: intervention_history holds each
+    # agent's muted (treatment) or counterfactual (control) list, which feed
+    # posts are classified against by author id.
+    - engagement_log
+    - intervention_history
+
+# No scripted follows -- the follow graph comes only from cold-start's
+# follow_mix below, so every sockpuppet's starting composition is controlled.
+actions:
+  follow_all: false
+
+timezone: America/New_York
+
+account_lists:
+  untrustworthy_sources: untrustworthy.json       # full inventory (1,408)
+  untrustworthy_top434: untrustworthy_top434.json # top 434 by followed_by; file order is the stratification key -- don't re-sort
+  news_sources: news_sources.json                 # full news inventory (1,346)
+
+sockpuppet_config:
+  persona_prompt: personas/mercury_basic.txt      # one minimal persona shared by every sockpuppet
+  account_lists:
+    - untrustworthy_top434
+    - news_sources
+  initialization_params:
+    min_follows: 13
+    max_follows: 13
+    min_engagements: 15
+    max_initialization_days: 3
+    follow_mix:
+      untrustworthy_top434: 3   # ~2.6 untrustworthy follows per participant in the Mercury pilot (3,149 / 1,210)
+      news_sources: 10
+
+experiment_design:
+  experiment_name: mercury_muting
+  treatment_arms:
+    - control
+    - treatment
+  randomization:
+    method: simple_random
+    seed: 42
+    ratios:
+      control: 0.5
+      treatment: 0.5
+  # One shared persona means the intervention must be the only difference
+  # between arms -- keep the condition out of what the model sees.
+  blind_prompt: true
+  phase_durations:
+    initialization: adaptive
+    pre_treatment: 7d
+    treatment: 1h
+    post_treatment: 7d
+
+intervention:
+  action: mute
+  target_accounts: untrustworthy_top434
+  selection_rule: stratified70    # 7 of every block of 10 + 3 of the last 4 = 304
+  execution_time: end_of_pre_treatment
+  applies_to_arms:
+    - treatment                   # control agents get the same draw, recorded as counterfactual
