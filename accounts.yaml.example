@@ -190,5 +190,11 @@ accounts:
   #                                           # stratifiedNN (e.g. stratified70) for NN% of every consecutive block
   #                                           # of 10 in the list file's own order (the file must already be sorted)
   #     execution_time: end_of_pre_treatment # end_of_pre_treatment (as `treatment` begins) or end_of_treatment
+  #     target_interval:                     # optional: random wait between consecutive targets (omit for none)
+  #       min_interval: 20s
+  #       max_interval: 40s
+  #     rejection_backoff:                   # optional (default 1m / 30m): on a platform rejection (rate limit,
+  #       backoff: 1m                        # "looks automated", authorization) wait `backoff`, doubled per
+  #       max_backoff: 30m                   # consecutive rejection up to max_backoff; resets on the next success
   #     applies_to_arms:                     # which treatment_arms values above have it executed; every other
   #       - treatment                        # arm's draw is recorded as counterfactual, not executed

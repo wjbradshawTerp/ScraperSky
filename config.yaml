@@ -326,6 +326,16 @@ account_lists:
 #                    comes from the leftover partial block (434 -> 301 + 3)
 #   execution_time - end_of_pre_treatment (fires as `treatment` begins) or
 #                    end_of_treatment (fires as `post_treatment` begins)
+#   target_interval- optional {min_interval, max_interval}: random wait
+#                    between consecutive targets, so a few hundred mutes
+#                    aren't fired back to back. Omit for no gap
+#   rejection_backoff- optional {backoff, max_backoff} (default 1m / 30m):
+#                    when the platform rejects a target (rate limit, "looks
+#                    automated", authorization) the account waits `backoff`,
+#                    doubled per consecutive rejection up to `max_backoff`,
+#                    replacing the normal gap until the next success. Each
+#                    account's intervention runs in its own thread, so one
+#                    account's backoff never slows another's
 #   applies_to_arms- which treatment_arms values have it executed; this is the
 #                    explicit form of the paper's "treatment agents receive
 #                    the configured intervention, control agents receive none"

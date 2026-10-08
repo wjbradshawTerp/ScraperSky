@@ -1,5 +1,6 @@
 import datetime
 import json
+import random
 import threading
 import time
 
@@ -29,6 +30,53 @@ PHASE_SEQUENCE = ["pre_treatment", "treatment", "post_treatment"]
 # it's the absence of an action, not one, and counting it would make the
 # threshold measure activation frequency rather than actual engagement.
 REAL_ACTIONS = ("like", "retweet", "follow", "mute")
+
+# execute_action() failure reasons that mean the platform declined the
+# request on purpose (rate limit, anti-automation, authorization) rather
+# than it failing in transit -- same markers as twitter.py's
+# PLATFORM_REFUSAL_MARKERS, plus HTTP 429, kept local so the orchestrator
+# doesn't import a platform scraper.
+REJECTION_MARKERS = ("automated", "authorization", "rate_limited", "not authorized")
+
+
+def _is_platform_rejection(result) -> bool:
+    response = result.get("system_response") or {}
+    if response.get("status_code") == 429:
+        return True
+    reason = str(response.get("reason", "")).lower()
+    return any(marker in reason for marker in REJECTION_MARKERS)
+
+
+class _InterventionPacer:
+    """Spacing between one account's intervention targets.
+
+    Normally a uniform draw from `intervention.target_interval`. Each
+    consecutive platform rejection doubles a backoff (starting at
+    `rejection_backoff.backoff`, capped at `max_backoff`) that then
+    replaces the normal gap -- across targets, not just retries of one, so
+    a rejection streak slows the whole remaining intervention. A success
+    resets it. One per account per intervention run, so one account's
+    rejections never slow another's.
+    """
+
+    def __init__(self, min_gap, max_gap, backoff, max_backoff):
+        self.min_gap, self.max_gap = min_gap, max_gap
+        self.backoff, self.max_backoff = backoff, max_backoff
+        self.consecutive_rejections = 0
+
+    def record_rejection(self):
+        self.consecutive_rejections += 1
+
+    def record_success(self):
+        self.consecutive_rejections = 0
+
+    def rejection_wait(self) -> float:
+        return min(self.backoff * (2 ** (self.consecutive_rejections - 1)), self.max_backoff)
+
+    def next_gap(self) -> float:
+        if self.consecutive_rejections:
+            return self.rejection_wait()
+        return random.uniform(self.min_gap, self.max_gap)
 
 
 class ExperimentOrchestrator:
@@ -410,6 +458,22 @@ class ExperimentOrchestrator:
         # (register_scraper() racing the tick loop) can never both run it.
         if not self.state.claim_intervention(account_name):
             return
+        # Runs in its own thread: with target_interval pacing a single
+        # account's intervention takes hours, and running it inline would
+        # stall whichever thread claimed it -- the tick loop (serializing
+        # every account's intervention behind one another) or that agent's
+        # own decision loop (so treatment agents would stop observing and
+        # acting while control agents carried on: a difference between
+        # arms caused by the plumbing, not the intervention). The phase
+        # still can't advance until it finishes (_interventions_settled),
+        # and a process killed mid-run resets "running" to "pending" on
+        # restart (_recover_interrupted_interventions).
+        threading.Thread(
+            target=self._run_claimed_intervention, args=(account_name, scraper),
+            name=f"intervention-{account_name}", daemon=True,
+        ).start()
+
+    def _run_claimed_intervention(self, account_name, scraper):
         try:
             self._run_intervention(account_name, scraper)
         except Exception as e:
@@ -458,13 +522,22 @@ class ExperimentOrchestrator:
             )
             return
 
+        pacer = _InterventionPacer(
+            *intervention_cfg.get("target_interval", (0.0, 0.0)),
+            *intervention_cfg.get("rejection_backoff", spec.parse_rejection_backoff(None)),
+        )
         results = []
-        for user_id in sampled:
+        for index, user_id in enumerate(sampled):
+            if index:
+                # Spread targets out instead of firing them back to back,
+                # and stretch the gap while the platform is rejecting this
+                # account's actions (see _InterventionPacer).
+                self._pace(account_name, pacer.next_gap(), pacer)
             # Retries transient failures (network exceptions, rate limits)
             # instead of recording one attempt as final -- a long target
             # list with real downtime between requests must not silently
             # drop targets just because a single attempt didn't land.
-            result = self._execute_intervention_target(scraper, action, user_id)
+            result = self._execute_intervention_target(account_name, scraper, action, user_id, pacer)
             # execute_action() only updates following_list/muted_accounts
             # bookkeeping on success, not interaction_history (that's only
             # ever populated by run_agent_runtime()'s/run_cold_start()'s own
@@ -479,7 +552,6 @@ class ExperimentOrchestrator:
             )
             results.append({"target": user_id, "execution_status": result["execution_status"]})
 
-        self.state.complete_intervention(account_name, results)
         agent_id = self.agent_id_by_account.get(account_name, account_name)
         self.repro_log.log_intervention_execution(
             account_name, action, list_name, fraction, results, agent_id=agent_id,
@@ -492,6 +564,11 @@ class ExperimentOrchestrator:
         scraper.write_intervention_history(self._intervention_history_record(
             account_name, action, list_name, fraction, selection_method, results, counterfactual=False,
         ))
+        # Marked complete LAST: completion is what lets the phase advance
+        # (_interventions_settled), and since this runs in its own thread,
+        # marking it any earlier would let the phase move on before this
+        # account's intervention records exist.
+        self.state.complete_intervention(account_name, results)
 
     def _record_counterfactual_intervention(
         self, account_name, scraper, action, list_name, fraction, selection_method, sampled,
@@ -504,7 +581,6 @@ class ExperimentOrchestrator:
         serves both arms in analysis.
         """
         results = [{"target": user_id, "execution_status": "not_executed"} for user_id in sampled]
-        self.state.complete_intervention(account_name, results, counterfactual=True)
         self.repro_log.log_intervention_execution(
             account_name, action, list_name, fraction, results,
             agent_id=self.agent_id_by_account.get(account_name, account_name),
@@ -513,6 +589,8 @@ class ExperimentOrchestrator:
         scraper.write_intervention_history(self._intervention_history_record(
             account_name, action, list_name, fraction, selection_method, results, counterfactual=True,
         ))
+        # Last, for the same reason as in _run_intervention.
+        self.state.complete_intervention(account_name, results, counterfactual=True)
 
     def _intervention_history_record(
         self, account_name, action, list_name, fraction, selection_method, results, counterfactual,
@@ -533,15 +611,20 @@ class ExperimentOrchestrator:
             "results": results,
         }
 
-    @staticmethod
-    def _execute_intervention_target(scraper, action, target, max_attempts=4, base_backoff_seconds=5):
+    def _execute_intervention_target(
+        self, account_name, scraper, action, target, pacer, max_attempts=4, base_backoff_seconds=5,
+    ):
         """Guarantees a real attempt for every sampled target: a single
         target's exception (network timeout, etc.) can't abort the rest of
-        the batch, and a failure (including a rate limit) gets retried with
-        exponential backoff before being recorded as final. Not infinite --
-        a permanently invalid target (e.g. a deleted account, a real 404
-        seen in prior live testing) shouldn't retry forever, just enough to
-        ride out real transient downtime.
+        the batch, and a failure gets retried before being recorded as
+        final. Not infinite -- a permanently invalid target (e.g. a deleted
+        account, a real 404 seen in prior live testing) shouldn't retry
+        forever, just enough to ride out real transient downtime.
+
+        A platform REJECTION (rate limit / "looks automated" /
+        authorization) waits out the account's scaling rejection backoff
+        rather than the short fixed one -- hammering an account the
+        platform is already pushing back on is how it gets flagged.
         """
         result = {"execution_status": "failure", "system_response": {"reason": "not attempted"}}
         for attempt in range(max_attempts):
@@ -550,10 +633,28 @@ class ExperimentOrchestrator:
             except Exception as e:
                 result = {"execution_status": "failure", "system_response": {"reason": repr(e)}}
             if result["execution_status"] == "success":
+                pacer.record_success()
                 return result
+            rejected = _is_platform_rejection(result)
+            if rejected:
+                pacer.record_rejection()
             if attempt < max_attempts - 1:
-                time.sleep(base_backoff_seconds * (2 ** attempt))
+                wait = pacer.rejection_wait() if rejected else base_backoff_seconds * (2 ** attempt)
+                self._pace(account_name, wait, pacer)
         return result
+
+    def _pace(self, account_name, seconds, pacer):
+        if seconds <= 0:
+            return
+        if pacer.consecutive_rejections:
+            # Only the backed-off waits are logged -- one row per normal
+            # gap would be hundreds of rows of noise per account.
+            self.repro_log.log_scheduling_decision(
+                account_name, "intervention_rejection_backoff", "waited",
+                wait_seconds=round(seconds, 1), consecutive_rejections=pacer.consecutive_rejections,
+                agent_id=self.get_agent_id(account_name),
+            )
+        time.sleep(seconds)
 
     def acquire_follow_slot(self, account_name):
         """Blocks until a slot is free in THIS account's sliding-window

@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import threading
 
 
 class AgentState:
@@ -17,6 +18,7 @@ class AgentState:
 
     def __init__(self, path):
         self.path = path
+        self._save_lock = threading.Lock()
         self.persona_prompt = None
         self.account_metadata = {}
         self.following_list = []
@@ -52,23 +54,27 @@ class AgentState:
         self.internal_memory = data.get("internal_memory", {})
 
     def _save(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "persona_prompt": self.persona_prompt,
-                    "account_metadata": self.account_metadata,
-                    "following_list": self.following_list,
-                    "muted_accounts": self.muted_accounts,
-                    "liked_tweets": self.liked_tweets,
-                    "retweeted_tweets": self.retweeted_tweets,
-                    "interaction_history": self.interaction_history,
-                    "initialization_progress": self.initialization_progress,
-                    "internal_memory": self.internal_memory,
-                },
-                f,
-                indent=2,
-            )
+        # Two threads can write this account's state at once: its own
+        # decision loop, and the orchestrator's intervention thread
+        # recording mutes. The lock keeps their file writes from
+        # interleaving; the snapshot is taken inside it (list copies are
+        # atomic under the GIL), so every save includes everything
+        # appended before it.
+        with self._save_lock:
+            snapshot = {
+                "persona_prompt": self.persona_prompt,
+                "account_metadata": dict(self.account_metadata),
+                "following_list": list(self.following_list),
+                "muted_accounts": list(self.muted_accounts),
+                "liked_tweets": list(self.liked_tweets),
+                "retweeted_tweets": list(self.retweeted_tweets),
+                "interaction_history": list(self.interaction_history),
+                "initialization_progress": dict(self.initialization_progress),
+                "internal_memory": dict(self.internal_memory),
+            }
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2)
 
     def record_agent_identity(self, persona_prompt, account_metadata):
         """Persists the paper's `agent_state.persona_prompt`/

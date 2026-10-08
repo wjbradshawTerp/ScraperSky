@@ -19,8 +19,9 @@ class ExperimentState:
     every opted-in account's thread via ExperimentOrchestrator (roadmap
     Phase 5).
 
-    Unlike AgentState (one instance, one owning thread, no locking needed),
-    this object is touched concurrently by every orchestrated account's
+    Unlike AgentState (one instance per account, touched only by that
+    account's own loop and its intervention thread, so a save lock is
+    enough), this object is touched concurrently by every orchestrated account's
     thread, so every mutation is guarded by a lock, and writes are atomic
     (write-to-temp then os.replace) -- a torn write here would corrupt
     randomization/intervention history that's much harder to reconstruct

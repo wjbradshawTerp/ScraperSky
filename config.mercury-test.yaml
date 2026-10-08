@@ -1,5 +1,7 @@
-# Mercury muting case study -- replicates the original Mercury muting
-# procedure as closely as possible. Run with CONFIG_PATH=config.mercury.yaml
+# Mercury muting TEST RUN (3d / 1d / 3d) -- same setup as config.mercury.yaml,
+# shortened phases and its own experiment_name so it never consumes the real
+# experiment's persisted arm assignments. Replicates the original Mercury muting
+# procedure as closely as possible. Run with CONFIG_PATH=config.mercury-test.yaml
 # (in .env for docker compose). Every key is documented in config.yaml; only
 # the values that differ from its defaults matter here.
 #
@@ -38,13 +40,13 @@ sockpuppet_config:
     min_follows: 13
     max_follows: 13
     min_engagements: 15
-    max_initialization_days: 3
+    max_initialization_days: 1   # pre_treatment's 3d clock starts at launch and includes setup -- cap setup at 1d
     follow_mix:
       untrustworthy_top434: 3   # ~2.6 untrustworthy follows per participant in the Mercury pilot (3,149 / 1,210)
       news_sources: 10
 
 experiment_design:
-  experiment_name: mercury_muting
+  experiment_name: mercury_muting_test
   treatment_arms:
     - control
     - treatment
@@ -59,9 +61,9 @@ experiment_design:
   blind_prompt: true
   phase_durations:
     initialization: adaptive
-    pre_treatment: 7d
-    treatment: 1h
-    post_treatment: 7d
+    pre_treatment: 3d
+    treatment: 1d
+    post_treatment: 3d
 
 intervention:
   action: mute

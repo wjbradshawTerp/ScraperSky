@@ -10,6 +10,8 @@ fraction -- so the translation lives here, in one place, rather than being
 spread across main.py's validation and the orchestrator's execution path.
 """
 
+from utils.duration import parse_duration
+
 # Paper section 3.1: "The framework currently supports simple random
 # assignment and can be extended to support stratified or blocked
 # randomization." Anything else is rejected rather than silently treated as
@@ -148,4 +150,53 @@ def parse_intervention(intervention_cfg) -> dict:
         "selection_method": parse_selection_method(intervention_cfg.get("selection_rule")),
         "trigger_phase": parse_execution_time(intervention_cfg.get("execution_time")),
         "applies_to_arms": list(applies_to_arms),
+        "target_interval": parse_target_interval(intervention_cfg.get("target_interval")),
+        "rejection_backoff": parse_rejection_backoff(intervention_cfg.get("rejection_backoff")),
     }
+
+
+def parse_rejection_backoff(rejection_backoff) -> tuple:
+    """`intervention.rejection_backoff: {backoff, max_backoff}` -> (initial,
+    cap) seconds. When the platform REJECTS an intervention action (rate
+    limit, "looks automated", authorization), the account waits `backoff`,
+    doubled for every consecutive rejection, capped at `max_backoff`; a
+    success resets it. Defaults to 1m / 30m -- on by default, since it only
+    ever slows an intervention down.
+    """
+    cfg = rejection_backoff or {}
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"intervention.rejection_backoff must be {{backoff, max_backoff}}, got {rejection_backoff!r}."
+        )
+    backoff = parse_duration(cfg.get("backoff", "1m"))
+    max_backoff = parse_duration(cfg.get("max_backoff", "30m"))
+    if backoff <= 0 or max_backoff < backoff:
+        raise ValueError(
+            f"intervention.rejection_backoff needs 0 < backoff <= max_backoff; got {rejection_backoff!r}."
+        )
+    return (backoff, max_backoff)
+
+
+def parse_target_interval(target_interval) -> tuple:
+    """`intervention.target_interval: {min_interval, max_interval}` -> the
+    (min, max) seconds to wait between consecutive intervention targets,
+    drawn uniformly per gap. Absent means (0, 0): no pacing, the original
+    back-to-back behavior.
+
+    Pacing exists because a few hundred mutes fired back to back is both a
+    rate-limit risk (a failed target is only retried for ~35s) and an
+    obvious automation signal.
+    """
+    if not target_interval:
+        return (0.0, 0.0)
+    if not isinstance(target_interval, dict):
+        raise ValueError(
+            f"intervention.target_interval must be {{min_interval, max_interval}}, got {target_interval!r}."
+        )
+    min_interval = parse_duration(target_interval.get("min_interval", 0))
+    max_interval = parse_duration(target_interval.get("max_interval", min_interval))
+    if min_interval < 0 or max_interval < min_interval:
+        raise ValueError(
+            f"intervention.target_interval needs 0 <= min_interval <= max_interval; got {target_interval!r}."
+        )
+    return (min_interval, max_interval)
