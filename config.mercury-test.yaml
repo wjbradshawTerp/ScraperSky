@@ -33,6 +33,10 @@ account_lists:
 
 sockpuppet_config:
   persona_prompt: personas/mercury_basic.txt      # one minimal persona shared by every sockpuppet
+  activation_schedule:              # how long each agent waits between feed checks
+    distribution: truncated_powerlaw
+    min_interval: 15m
+    max_interval: 3h               # tighter than the 15m/6h default for a 7-day test, for more baseline activity
   account_lists:
     - untrustworthy_top434
     - news_sources

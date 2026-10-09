@@ -1,5 +1,9 @@
 .env
+# Every *accounts.yaml (accounts.yaml, testrun_accounts.yaml, ...) holds live
+# per-account credentials. accounts.yaml.example is the only committed template.
 accounts.yaml
+*accounts.yaml
+!accounts.yaml.example
 
 # Real account lists that name specific third-party accounts. The
 # untrustworthy_sources list labels named real accounts as "untrustworthy",
@@ -9,6 +13,8 @@ accounts.yaml
 untrustworthy_sources.json
 # Backups of accounts.yaml carry the same live credentials as the original.
 accounts.yaml.bak*
+# Output of extract_account_tokens.py -- holds live auth/csrf tokens.
+*.tokens.json
 # Mercury case-study inventories -- same reason: they label named real
 # accounts as untrustworthy (news_sources.json is ignored alongside them so
 # the case study's lists stay together, local-only).

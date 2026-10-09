@@ -16,7 +16,7 @@ cd ScraperSky
 cp .env.example .env
 cp accounts.yaml.example accounts.yaml
 ```
-3. Open `accounts.yaml` and fill in credentials for each account you want to run (see below).
+3. Fill in credentials for each account you want to run — fastest with the **token extractor** below, which turns copied browser requests straight into `accounts.yaml` (see Credentials).
 4. Review `config.yaml` and adjust `data_collection.targets`/`platform`/etc. as needed (defaults work out of the box; per-account overrides live in `accounts.yaml`).
 5. **Only if running the Agent Runtime** (any account has `sockpuppet_config.persona_prompt` set): install [Ollama](https://ollama.com/download), pull the model, and start the server:
 ```bash
@@ -29,20 +29,38 @@ ollama serve
 
 ScraperSky can run multiple accounts at once, each with its own credentials. Every account needs its own **auth_token**, **bearer_token**, and **csrf_token**, entered in `accounts.yaml` (not `.env` — see Configuration below).
 
-To get these for a given account:
+### Fast path: the token extractor (recommended for many accounts)
 
-1. Log into that Twitter account on desktop and go to the Home page (X's default algorithmic feed).
-2. Open browser DevTools and go to the **Network** tab.
+`extract_account_tokens.py` turns copied browser requests into `accounts.yaml` entries, so you don't hand-copy three fields per account. It only ever reads a request **you** deliberately copied for **your own** logged-in account — it's a formatter, not a tool that reaches into the browser and harvests sessions.
 
-<img width="1206" height="470" alt="image" src="https://github.com/user-attachments/assets/e7a4ae50-d7ae-4bfe-85c6-92c66dbf5496" />
+For each account, copy one request as cURL:
 
-3. Find any request titled **user_flow.json** (scroll the Twitter page a little if none appear).
-4. In the request, scroll to the **Request Headers** section:
-   - Set `bearer_token` to the value of **Authorization**
-   - Set `auth_token` to the **auth_token** field inside **Cookie**
-   - Set `csrf_token` to the **ct0** field inside **Cookie**
+1. Log into the account on desktop; open DevTools (F12) → **Network** tab.
+2. Click any request to `x.com` (scroll the page a little if none appear), then right-click → **Copy** → **Copy as cURL** (bash *or* cmd — both parse).
+3. Paste it into a scratch file. Put all your accounts' cURLs in one file (blank lines between them are fine), or one file per account.
 
-Repeat for each additional account, adding one entry per account under `accounts:` in `accounts.yaml`.
+Then generate the YAML:
+
+```bash
+# several cURLs in one file -> accounts.yaml, named in order
+python extract_account_tokens.py --yaml --out accounts.yaml --names primary,secondary requests.txt
+
+# one file per account (the filename becomes the account name) -> JSON
+python extract_account_tokens.py primary.txt secondary.txt > accounts.tokens.json
+```
+
+Naming each account, first match wins: a `name: <handle>` line right before its cURL, then `--names` (applied in order), then the filename, then `account1`, `account2`, …. The script keeps the `Bearer ` prefix on `bearer_token`, undoes cmd-shell escaping, and flags missing fields or duplicate accounts. Run `python extract_account_tokens.py -h` for all options.
+
+> The extractor's output holds **live credentials**. `accounts.yaml`, `accounts.yaml.bak*`, and `*.tokens.json` are gitignored — keep any dump local, and don't paste it into chat, tickets, or shared drives. The `bearer_token` is the same public web-app constant for every account; `auth_token` and `csrf_token` are full account access.
+
+### Manual alternative
+
+To fill a single account by hand: in the same **Network** tab, find any request titled **user_flow.json** and read its **Request Headers**:
+- `bearer_token` ← **Authorization**
+- `auth_token` ← the **auth_token** field inside **Cookie**
+- `csrf_token` ← the **ct0** field inside **Cookie**
+
+Add one entry per account under `accounts:` in `accounts.yaml`.
 
 > **Note:** Credentials expire when that account logs out or Twitter rotates them. If you get 403 errors for one account, extract fresh credentials for it and update its entry in `accounts.yaml`.
 
