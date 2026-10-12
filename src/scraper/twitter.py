@@ -210,7 +210,10 @@ class TwitterScraper(BaseScraper):
         )
 
         self._log("Initialising x-client-transaction-id generator...")
-        self.ct = fetch_and_init()
+        # Pass this account's session cookies: x.com now redirects a
+        # logged-out /home request to an onboarding page with no ondemand.s
+        # manifest, so the bootstrap must be authenticated (see x_client.py).
+        self.ct = fetch_and_init(cookies={"auth_token": account.auth_token, "ct0": account.csrf_token})
         self._log("Transaction generator ready.")
 
         self.client = httpx.Client(

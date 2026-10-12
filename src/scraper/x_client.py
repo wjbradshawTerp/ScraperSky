@@ -179,14 +179,45 @@ class XClientTransaction:
         return base64.b64encode(payload).decode().rstrip("=")
 
 
-def fetch_and_init() -> XClientTransaction:
-    """Fetch x.com and the ondemand JS, then initialise an XClientTransaction."""
+def fetch_and_init(cookies: dict = None) -> XClientTransaction:
+    """Fetch x.com and the ondemand JS, then initialise an XClientTransaction.
+
+    `cookies` must carry the account's session (`auth_token` and `ct0`): as of
+    2026-10 x.com redirects a LOGGED-OUT request for /home to an onboarding
+    page that no longer embeds the `ondemand.s` chunk manifest this bootstrap
+    needs, so an unauthenticated fetch can't find it. Passing the session
+    cookies gets the real logged-in app shell, which still carries the
+    manifest.
+    """
     with httpx.Client(follow_redirects=True, timeout=15) as client:
-        r = client.get("https://x.com/home", headers=BROWSER_HEADERS)
+        r = client.get("https://x.com/home", headers=BROWSER_HEADERS, cookies=cookies or {})
         html = r.text
 
-        chunk_id = re.search(r'(\d+):"ondemand\.s"', html).group(1)
-        chunk_hash = re.search(rf'{chunk_id}:"([a-f0-9]+)"', html).group(1)
+        chunk_match = re.search(r'(\d+):"ondemand\.s"', html)
+        if chunk_match is None:
+            # The usual cause is a logged-out/expired session: x.com bounced
+            # the request to onboarding/login, whose HTML has no ondemand.s
+            # manifest. Fail with something diagnosable instead of a bare
+            # AttributeError on .group().
+            final_url = str(r.url)
+            redirected = any(s in final_url for s in ("onboarding", "login", "flow/login"))
+            raise RuntimeError(
+                "Could not find the ondemand.s chunk in x.com's HTML "
+                f"(status={r.status_code}, final_url={final_url!r}). "
+                + (
+                    "x.com served a logged-out page -- the account's auth_token/ct0 are "
+                    "missing, expired, or invalid."
+                    if redirected or not cookies else
+                    "x.com returned an unexpected page shape; the bootstrap may need updating."
+                )
+            )
+        chunk_id = chunk_match.group(1)
+        hash_match = re.search(rf'{chunk_id}:"([a-f0-9]+)"', html)
+        if hash_match is None:
+            raise RuntimeError(
+                f"Found ondemand.s chunk id {chunk_id} but no matching hash in x.com's HTML."
+            )
+        chunk_hash = hash_match.group(1)
         js_url = f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{chunk_hash}a.js"
         js = client.get(js_url, headers=BROWSER_HEADERS).text
 
