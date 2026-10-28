@@ -12,7 +12,8 @@ platform: twitter
 
 data_collection:
   targets:
-    - home
+    - home        # X's algorithmic For You feed (GraphQL HomeTimeline)
+    - following   # X's reverse-chronological Following feed (GraphQL HomeLatestTimeline); observed alongside home each activation
     # Both streams are needed for analysis: intervention_history holds each
     # agent's muted (treatment) or counterfactual (control) list, which feed
     # posts are classified against by author id.
