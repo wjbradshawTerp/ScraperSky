@@ -1,0 +1,13 @@
+{
+    "_comment": "R1, R2: Republican national news. Followed by Republican-persona accounts. From the persona-conjoint spec's seed-follow table.",
+    "users": [
+        {
+            "user_id": "1367531",
+            "_comment": "FoxNews"
+        },
+        {
+            "user_id": "11134252",
+            "_comment": "Republicans"
+        }
+    ]
+}

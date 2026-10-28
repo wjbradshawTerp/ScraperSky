@@ -126,6 +126,11 @@ accounts:
   #     agent_id: mercury_p017              # stable id for this sockpuppet in the experiment; defaults to the account name
   #     phase: pre_treatment                # static stand-in, used ONLY when experiment_design.treatment_arms (below) is NOT set for this account
   #     treatment_arm: control              # static stand-in, used ONLY when experiment_design.treatment_arms (below) is NOT set for this account
+  #     show_feed_position: true            # tell the model where each post sat in its feed ("post 2 of 20 in this
+  #                                          # feed load", counted per feed). Needed for persona rules about ordinal
+  #                                          # position ("engage with the 2nd post you see"), since the runtime
+  #                                          # decides one post per call. Default false = prompts unchanged. The
+  #                                          # position is logged to runtime_log either way.
   #     activation_schedule:                 # how long the Agent Runtime waits between decision cycles
   #       distribution: truncated_powerlaw   # uniform, truncated_powerlaw, or poisson
   #       min_interval: 15m                  # shorthand duration: Ns / Nm / Nh / Nd

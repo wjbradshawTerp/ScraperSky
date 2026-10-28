@@ -198,10 +198,20 @@ account_lists:
 # 4/hour with an 8m floor sits conservatively inside that. See ROADMAP.md's
 # retweet-reliability entry before changing these.
 #
+# sockpuppet_config.show_feed_position: the runtime decides ONE post per model
+# call, so the model otherwise has no idea where a post sat in its feed. Set
+# true to tell it ("post 2 of 20 in this feed load", counted within each feed
+# separately) -- needed for any persona rule about ordinal position, e.g. "engage
+# with the 2nd post you see every time the feed is loaded" (see
+# config.conjoint.yaml). Off by default so existing experiments' prompts are
+# unchanged. Every runtime_log row records feed_position/feed_size either way,
+# so compliance with such a rule can be audited afterwards.
+#
 # sockpuppet_config:
 #   persona_prompt: personas/example_persona.txt
 #   phase: pre_treatment
 #   treatment_arm: control
+#   show_feed_position: false
 #   activation_schedule:
 #     distribution: truncated_powerlaw
 #     min_interval: 15m

@@ -35,23 +35,56 @@ ScraperSky can run multiple accounts at once, each with its own credentials. Eve
 
 For each account, copy one request as cURL:
 
-1. Log into the account on desktop; open DevTools (F12) → **Network** tab.
-2. Click any request to `x.com` (scroll the page a little if none appear), then right-click → **Copy** → **Copy as cURL** (bash *or* cmd — both parse).
-3. Paste it into a scratch file. Put all your accounts' cURLs in one file (blank lines between them are fine), or one file per account.
+1. Log into the account on desktop; open DevTools (F12) → **Network** tab. Logging into several accounts at once needs one browser container per account — see [Several accounts at once](#several-accounts-at-once-one-firefox-container-per-account) below.
+2. Click any request to `x.com` (scroll the page a little if none appear), then right-click it. In Chrome/Edge: **Copy** → **Copy as cURL** (bash *or* cmd — both parse). In Firefox: **Copy Value** → **Copy as cURL** (menu labels vary slightly by version).
+3. Save it as a text file **under `curl_dumps/`** (e.g. `curl_dumps/primary.txt`). That folder is gitignored; a loose `requests.txt` or `primary.txt` in the repo root is **not**, and a copied cURL carries the whole logged-in session. Put all your accounts' cURLs in one file (blank lines between them are fine), or one file per account.
 
 Then generate the YAML:
 
 ```bash
-# several cURLs in one file -> accounts.yaml, named in order
-python extract_account_tokens.py --yaml --out accounts.yaml --names primary,secondary requests.txt
+# several cURLs in one file -> a YAML block, named in order
+python extract_account_tokens.py --yaml --out batch_accounts.yaml --names primary,secondary curl_dumps/requests.txt
 
 # one file per account (the filename becomes the account name) -> JSON
-python extract_account_tokens.py primary.txt secondary.txt > accounts.tokens.json
+python extract_account_tokens.py curl_dumps/primary.txt curl_dumps/secondary.txt > accounts.tokens.json
 ```
+
+> **`--out` overwrites its target.** Pointing it at `accounts.yaml` replaces the whole file and loses any entries already in it. If `accounts.yaml` already has accounts, write to a different file as above and copy the new entries across. Name it so it still ends in `accounts.yaml` (e.g. `batch_accounts.yaml`): the gitignore rule is `*accounts.yaml`, so a name like `accounts.new.yaml` would **not** be ignored.
 
 Naming each account, first match wins: a `name: <handle>` line right before its cURL, then `--names` (applied in order), then the filename, then `account1`, `account2`, …. The script keeps the `Bearer ` prefix on `bearer_token`, undoes cmd-shell escaping, and flags missing fields or duplicate accounts. Run `python extract_account_tokens.py -h` for all options.
 
-> The extractor's output holds **live credentials**. `accounts.yaml`, `accounts.yaml.bak*`, and `*.tokens.json` are gitignored — keep any dump local, and don't paste it into chat, tickets, or shared drives. The `bearer_token` is the same public web-app constant for every account; `auth_token` and `csrf_token` are full account access.
+> The extractor's output holds **live credentials**. Anything ending in `accounts.yaml`, plus `accounts.yaml.bak*`, `*.tokens.json`, and `curl_dumps/`, is gitignored — keep any dump local, and don't paste it into chat, tickets, or shared drives. The `bearer_token` is the same public web-app constant for every account; `auth_token` and `csrf_token` are full account access. To get credentials to or from a teammate, see [Handing credentials to someone else](#handing-credentials-to-someone-else).
+
+### Several accounts at once: one Firefox container per account
+
+Each account needs its own logged-in browser session, and ordinary tabs share cookies — logging into a second account would log the first one out. Firefox's [Multi-Account Containers](https://addons.mozilla.org/firefox/addon/multi-account-containers/) extension fixes that: each container keeps its own cookies, so tabs in different containers stay logged into different X accounts at the same time without interfering with each other.
+
+1. Install the extension, then create one container per account and name it after the account (`p01`, `primary`, …).
+2. Open `x.com` for that account **only** in its container. Keep that account's DevTools/cURL work in a tab of the same container.
+3. Copy the cURL (steps above) right after signing in or logging in.
+4. **Never log out of the account, and never clear that container's cookies.** `auth_token` *is* the logged-in session: ending the session makes the token you extracted stop working. Closing the tab or the whole browser is fine; the container keeps the session.
+
+### Handing credentials to someone else
+
+When a colleague creates accounts for you (the persona study splits ~36 signups across several people), the credentials have to travel. A copied cURL is the full session, so treat it like a password:
+
+- **What to send:** the one cURL for that account, saved as `<account id>.txt` (e.g. `p01.txt`) — nothing else, and one account per file.
+- **How to send it:** through a channel with access control that doesn't keep a permanent copy, such as a team password manager or a one-time secret link. **Not** chat, email, tickets, or a shared drive, and never the repo.
+- **Sender:** once the receiver confirms it arrived, delete your copy. Do not log the account out.
+- **Receiver:** save it under `curl_dumps/`, add the account (for the persona study: `python register_persona_account.py p01 curl_dumps/p01.txt`), then delete the received file. Run `git status` and confirm nothing new is listed.
+- **If one is ever exposed** (pasted somewhere shared, or committed): log that account out of X, which ends the session and makes the leaked token useless, then extract a fresh one. Removing a commit from a public repo does not un-leak a token already pushed — treat it as compromised.
+
+### Checking that accounts work (`check_accounts.py`)
+
+After adding accounts, confirm each one's session actually works before a long run:
+
+```bash
+poetry run python check_accounts.py --only p01,p09,p10
+```
+
+For each account it loads x.com with that account's session, fetches one small page of the `home` and `following` feeds using the study's own request code, and prints one line: `OK`, `AUTH FAILED` (expired/logged out/wrong tokens — extract a fresh cURL), `LOCKED`, `SUSPENDED`, `FLAGGED` (X called the request automated — back off), `RATE LIMITED` (the account is probably fine; retry later), `WRONG ACCOUNT`, `NETWORK ERROR`, or `UNEXPECTED` with X's own message. It also tries to read which `@handle` the session belongs to; pass `--tracker signup_tracker.csv` (a CSV with `id` and `handle` columns) and a cURL copied from the wrong browser container shows up as `WRONG ACCOUNT`. Exit code is non-zero if any account isn't `OK`, and tokens are never printed.
+
+It only reads, so it can't prove an account is free to follow, like or repost — a restricted account can still pass. The first real run's `engagement_log` is the true test of that. It talks to X from your IP like the study does (accounts are checked one at a time with a pause), so run it when you need it, not in a loop.
 
 ### Manual alternative
 
@@ -62,7 +95,7 @@ To fill a single account by hand: in the same **Network** tab, find any request 
 
 Add one entry per account under `accounts:` in `accounts.yaml`.
 
-> **Note:** Credentials expire when that account logs out or Twitter rotates them. If you get 403 errors for one account, extract fresh credentials for it and update its entry in `accounts.yaml`.
+> **Note:** Credentials expire when that account logs out or Twitter rotates them — which is why you should never log an account out of its browser container once you've extracted its token. If you get 403 errors for one account, extract fresh credentials for it and update its entry in `accounts.yaml`.
 
 ## Configuration
 
@@ -218,6 +251,7 @@ experiment_design:
 | `sockpuppet_config.treatment_arm` | Static per-account override, used only when `experiment_design.treatment_arms` is NOT set — an opted-in account's real, randomized assignment comes from the orchestrator instead |
 | `sockpuppet_config.activation_schedule` | How long the runtime waits between decision cycles. `distribution: uniform` samples evenly between `min_interval`/`max_interval`; `truncated_powerlaw` is approximated as a log-uniform draw over the same range; `poisson` draws exponential inter-arrival times with the window's midpoint as the mean, clamped into the window (the schema gives a window, not a rate) |
 | `sockpuppet_config.agent_id` | Stable identifier for this sockpuppet within the experiment, written into every observation, runtime-log, and engagement row | *(defaults to the account name)* |
+| `sockpuppet_config.show_feed_position` | `true` tells the model where each post sat in its feed (`post 2 of 20 in this feed load`, counted within each feed). The runtime decides one post per model call, so a persona rule about ordinal position ("engage with the 2nd post you see") is unfollowable without it. Default `false` leaves prompts unchanged; `feed_position`/`feed_size` are written to every runtime-log row either way |
 | `sockpuppet_config.action_rate_limits` | Per-action pacing on top of the platform's own limits, e.g. `retweet: {max_per_hour: 4, min_interval: 8m}`. An action with no entry is uncapped. Both constraints apply independently — an hourly cap alone still permits a burst within a minute. A capped decision becomes a logged `no_action` with `no_action_reason: "rate_capped"` rather than blocking the activation. The retweet defaults are sized from live observation (~35% retweet success rate, misleading platform refusals), not a documented limit — see `ROADMAP.md` |
 | `experiment_design.experiment_name` | Used to build a readable `experiment_id` (`<experiment_name>::<account_name>`) in the runtime's `experiment_context` |
 
@@ -291,6 +325,34 @@ What the orchestrator actually replaces for an opted-in account:
 - **Termination** — finishing the last phase completes the experiment (`experiment_status: completed`), logs a termination event, and every account stops acting and exits, so the process shuts down cleanly rather than running on past the end of the experiment. `experiment_status` also supports `paused`, which freezes phase transitions and idles every agent without ending the experiment.
 
 Every scheduling decision, treatment assignment, intervention execution, phase transition, account failure, and termination is recorded to a separate reproducibility log (`data/<date>/_orchestrator/_experiment/run_..._reproducibility_log.jsonl`).
+
+### Persona conjoint study (`generate_personas.py`)
+
+A second, independent use of the system: instead of randomizing a treatment, randomize **who the account is**. 36 Maryland sockpuppets fill a full factorial of age band (13-18 / 18-29 / 30+) × gender × party (Democrat / no partisan marker / Republican), 2 per cell, and the question is what election content each persona gets served. There is no `treatment_arms` and no `intervention`, so the orchestrator stays off and each agent just uses X in one continuous phase. Everything shared lives in `config.conjoint.yaml` (run with `CONFIG_PATH=config.conjoint.yaml`); the per-account parts come from two single-use scripts, in the same spirit as `extract_account_tokens.py`:
+
+```bash
+# 1. personas/p01.txt ... p36.txt + signup_sheet.csv (+ signup_sheet.meta.json)
+python generate_personas.py
+
+# 2. create each account by hand in the sheet's order, using its row:
+#    birthdate + display name, location Maryland, empty bio
+
+# 3. copy a request to x.com as cURL from that account's logged-in tab, save it under
+#    curl_dumps/ (gitignored: it holds live credentials), then add its accounts.yaml entry.
+#    (Several accounts need one Firefox container each, and a colleague's cURL has to be
+#    handed over safely -- see "Several accounts at once" and "Handing credentials" above.)
+python register_persona_account.py p01 curl_dumps/p01.txt
+```
+
+`generate_personas.py` writes the persona text and the sheet in one run so they cannot drift apart. Persona text is the spec's fixed template — `You are 15-years old, female Democrat, living in Maryland. Engage with 2nd post you see every time the feed is loaded.` — with the party word left out for the no-partisan-marker level. Everything is drawn from `--seed` (default 42), so the same command reproduces the same 36 accounts; `signup_sheet.meta.json` records the exact command. Points worth knowing:
+
+- **Account order is blocked-randomized**: ids are dealt out in 2 blocks of 18, each containing every cell once. Create accounts in sheet order and the first 18 already form a complete one-per-cell design, so if signups stall the data is still balanced rather than lopsided.
+- **Age bands are drawn from 13-17 / 18-29 / 30-65**, not the spec's overlapping `13-18`/`18-29` labels (see `AGE_BANDS` at the top of the script). Each birthdate is chosen so the persona's age is correct on signup day *and* through the end of the data window (`--window-end`, default 2026-11-06), so nobody has a birthday mid-study.
+- **Engage rule** (the *n* in "engage with the *n*-th post") is drawn from 1-5 (`--engage-min/--engage-max`), spread evenly across accounts rather than left to chance.
+- **Follows are deterministic**: every account follows the two Maryland local sources plus the two national sources for its party (`local_news.json`, `national_dem.json`, `national_non.json`, `national_rep.json`), via a per-account `follow_mix` in cold start.
+- It refuses to overwrite files that differ from a re-run unless `--force`; `--dry-run` previews the sheet.
+
+`register_persona_account.py` reuses `extract_account_tokens.py`'s parsing, appends a ready-to-run entry (tokens, persona file, the sheet's `follow_mix`) to `accounts.yaml` without disturbing existing entries or comments, never prints a token, and refuses duplicates. `config.conjoint.yaml` sets `sockpuppet_config.show_feed_position: true`, which is what lets the model follow the "*n*-th post" rule at all (see the config table above).
 
 ## Follow list
 

@@ -89,9 +89,20 @@ def format_recent_interactions(recent_interactions) -> str:
     )
 
 
+def format_feed_position(feed_position) -> str:
+    """` -- post 2 of 20 in this feed load`, or "" when no position is
+    supplied. Positions are 1-based and counted within ONE feed (home and
+    following are separate loads), in the order X returned them.
+    """
+    if not feed_position:
+        return ""
+    position, total = feed_position
+    return f" -- post {position} of {total} in this feed load"
+
+
 def construct_prompt(
     persona_prompt: str, tweet: dict, target_name: str, experiment_context: dict,
-    allowed_actions, recent_interactions=None,
+    allowed_actions, recent_interactions=None, feed_position=None,
 ) -> str:
     behavioral_rules = f"{RUNTIME_BEHAVIORAL_RULES}\n\nALLOWED ACTIONS this cycle: {', '.join(allowed_actions)}"
     return (
@@ -101,7 +112,7 @@ def construct_prompt(
         f"{format_experiment_context(experiment_context)}\n\n"
         "=== YOUR RECENT ACTIONS (avoid repeating these) ===\n"
         f"{format_recent_interactions(recent_interactions)}\n\n"
-        f"=== OBSERVED POST (from {target_name}) ===\n"
+        f"=== OBSERVED POST (from {target_name}{format_feed_position(feed_position)}) ===\n"
         f"{_format_tweet(tweet)}\n\n"
         "=== BEHAVIORAL RULES ===\n"
         f"{behavioral_rules}\n\n"

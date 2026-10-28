@@ -872,11 +872,15 @@ class TwitterScraper(BaseScraper):
             if engagements_done() < min_engagements:
                 if not engagement_queue:
                     engagement_queue = self._next_cold_start_engagement_candidates()
+                    queue_total = len(engagement_queue)
                     if not engagement_queue:
                         self._log("[cold-start] No engagement candidates available right now; waiting.")
                         time.sleep(account.scroll_delay)
                         continue
                 tweet = engagement_queue.pop(0)
+                # 1-based position within the page this queue was filled
+                # from: the first pop leaves queue_total - 1 behind.
+                feed_position = (queue_total - len(engagement_queue), queue_total)
                 tweet_id = tweet.get("tweet_id")
                 if not tweet_id:
                     continue
@@ -893,6 +897,7 @@ class TwitterScraper(BaseScraper):
                     self._decide_and_execute(
                         persona_prompt, engine, tweet, "home",
                         "initialization", cold_start_actions, str(uuid.uuid4()),
+                        feed_position=feed_position,
                     )
                 else:
                     action = random.choice(["like", "retweet"])
@@ -1395,6 +1400,7 @@ class TwitterScraper(BaseScraper):
         self, observation_id, phase, prompt, decision, action, target,
         observed_tweet_id, result, target_name=None, no_action_reason=None,
         platform_observation=None, experiment_context=None, prompt_blinded=False,
+        feed_position=None,
     ):
         """Logging stage (roadmap Phase 4, paper section 3.3 stage 5 /
         section 4 runtime_log schema). `data_collection.logging: minimal`
@@ -1434,6 +1440,12 @@ class TwitterScraper(BaseScraper):
             "phase": phase,
             "observed_tweet_id": observed_tweet_id,
             "target_name": target_name,
+            # 1-based position of this post within the feed page it came
+            # from, and that page's size -- None where no feed applies
+            # (the nothing-observed row). Always logged, whether or not the
+            # model was shown it.
+            "feed_position": feed_position[0] if feed_position else None,
+            "feed_size": feed_position[1] if feed_position else None,
             "selected_action": action,
             "target_object": target,
             "no_action_reason": no_action_reason,
@@ -1575,7 +1587,7 @@ class TwitterScraper(BaseScraper):
             return
 
         for target_name, tweets in platform_state.items():
-            for tweet in tweets:
+            for position, tweet in enumerate(tweets, start=1):
                 if self._should_stop():
                     self._log("[runtime] Experiment completed mid-activation; stopping.")
                     return
@@ -1591,15 +1603,23 @@ class TwitterScraper(BaseScraper):
                 self._decide_and_execute(
                     persona_prompt, engine, tweet, target_name,
                     current_phase, self._allowed_actions_for_phase(current_phase), observation_id,
+                    feed_position=(position, len(tweets)),
                 )
 
     def _decide_and_execute(
         self, persona_prompt, engine, tweet, target_name, phase, allowed_actions, observation_id,
+        feed_position=None,
     ):
         """Prompt Construction -> Decision -> Execution -> Logging for ONE
         observed post (paper section 3.3 stages 2-5). Shared by the Agent
         Runtime and persona-driven cold-start, which the paper specifies run
         the same cycle and differ only in the allowed action set.
+
+        `feed_position` is (position, total) of this post within the feed
+        page it was loaded with. It is ALWAYS written to the runtime_log (so
+        a persona rule about ordinal position can be audited afterwards) but
+        only shown to the model when `sockpuppet_config.show_feed_position`
+        is on, so existing experiments' prompts are unchanged.
         """
         experiment_context = self._build_experiment_context(allowed_actions)
         # Cold-start passes phase="initialization" explicitly, which the
@@ -1615,6 +1635,7 @@ class TwitterScraper(BaseScraper):
             persona_prompt, tweet, target_name,
             blind_experiment_context(experiment_context) if blind else experiment_context,
             allowed_actions, recent_interactions,
+            feed_position=feed_position if self.account.show_feed_position else None,
         )
 
         decision = engine.decide(prompt)
@@ -1637,6 +1658,7 @@ class TwitterScraper(BaseScraper):
             tweet.get("tweet_id"), result, target_name=target_name,
             no_action_reason=no_action_reason, platform_observation=tweet,
             experiment_context=experiment_context, prompt_blinded=blind,
+            feed_position=feed_position,
         )
 
         # A phase whose exit condition is max_action_count should end on the

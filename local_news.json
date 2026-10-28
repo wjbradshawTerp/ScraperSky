@@ -1,0 +1,13 @@
+{
+    "_comment": "L1, L2: Maryland local news. Followed by EVERY persona account. From the persona-conjoint spec's seed-follow table.",
+    "users": [
+        {
+            "user_id": "15391102",
+            "_comment": "WUSA9"
+        },
+        {
+            "user_id": "8861752",
+            "_comment": "Baltimoresun"
+        }
+    ]
+}

@@ -1,0 +1,94 @@
+# Persona conjoint on X -- "What election-related content do different
+# Maryland voter personas get on X?"
+#
+# 36 sockpuppets (age band x gender x party, k=2 per cell), each with its OWN
+# persona and its OWN seed follows, observed through the election window
+# (cold start, then ~3 days before Election Day, Election Day, ~3 days after).
+# Run with CONFIG_PATH=config.conjoint.yaml (in .env for docker compose).
+# Every key is documented in config.yaml; only what differs from its
+# defaults matters here.
+#
+# What's per-account vs shared:
+#   shared (here)    feeds collected, activation schedule, the four seed-follow
+#                    lists, the "show feed position" switch
+#   per account      persona_prompt + initialization_params (incl. follow_mix),
+#                    written by register_persona_account.py from the signup sheet
+#
+# Workflow:
+#   1. python generate_personas.py           -> personas/p01..p36.txt + signup_sheet.csv
+#   2. create each account by hand in sheet order (birthdate + display name
+#      from its row; location Maryland; empty bio)
+#   3. python register_persona_account.py p01 p01.txt   (the cURL copied from
+#      that account's logged-in tab) -> appends its accounts.yaml entry
+#
+# There is NO experiment_design.treatment_arms and NO intervention on purpose:
+# with neither, the experiment orchestrator stays off. Each agent keeps using
+# X in one continuous phase -- no randomization, no muting, no phase clock.
+# Randomization is in WHO each persona is (generate_personas.py's seed), not
+# in anything done to them. It therefore also never stops on its own: end the
+# run by stopping the process once the window closes.
+
+platform: twitter
+
+data_collection:
+  targets:
+    - home          # X's algorithmic For You feed
+    - following     # X's reverse-chronological Following feed
+    - engagement_log   # every action an agent takes
+
+# No scripted follows. The follow graph comes only from cold start's
+# follow_mix (set per account), so every persona starts from exactly the
+# four accounts the design gives it.
+actions:
+  follow_all: false
+
+timezone: America/New_York
+
+# The four seed lists; each holds exactly two accounts, so a follow_mix of
+# {local_news: 2, national_dem: 2} follows all four -- deterministic, the
+# same for everyone in that party. Real ids from the spec's seed-follow table.
+account_lists:
+  local_news: local_news.json
+  national_dem: national_dem.json
+  national_non: national_non.json
+  national_rep: national_rep.json
+
+sockpuppet_config:
+  # One continuous phase. Used because no orchestrator is assigning one; it
+  # is also the label every log row carries.
+  phase: data_collection
+
+  # The personas say "engage with the n-th post you see every time the feed is
+  # loaded". The runtime decides one post per model call, so without this the
+  # model never learns which post is the n-th. Turns on " -- post 2 of 20 in
+  # this feed load" in each prompt; the position is logged either way, so
+  # compliance with the rule can be checked from runtime_log afterwards.
+  show_feed_position: true
+
+  # Every list any persona might follow from; each account's follow_mix picks
+  # the two it uses. (follow_mix names must appear here.)
+  account_lists:
+    - local_news
+    - national_dem
+    - national_non
+    - national_rep
+
+  # How long each agent waits between feed loads. Same as the Mercury test.
+  # With 36 agents sharing one local model this decides how much work the
+  # model has to get through -- see ROADMAP.md before shortening it.
+  activation_schedule:
+    distribution: truncated_powerlaw
+    min_interval: 15m
+    max_interval: 3h
+
+  # These are fresh, hand-made accounts that cost real effort to replace, and
+  # retweet is the action X refuses most (see ROADMAP.md's retweet notes).
+  action_rate_limits:
+    retweet:
+      max_per_hour: 4
+      min_interval: 8m
+
+# Names this study in every log row's experiment_id. It opts nothing into the
+# orchestrator (that needs treatment_arms, deliberately absent).
+experiment_design:
+  experiment_name: persona_conjoint_md

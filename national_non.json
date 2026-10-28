@@ -1,0 +1,13 @@
+{
+    "_comment": "N1, N2: nonpartisan national news. Followed by no-partisan-marker accounts. From the persona-conjoint spec's seed-follow table.",
+    "users": [
+        {
+            "user_id": "807095",
+            "_comment": "nytimes"
+        },
+        {
+            "user_id": "3108351",
+            "_comment": "WSJ"
+        }
+    ]
+}

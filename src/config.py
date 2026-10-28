@@ -143,6 +143,18 @@ class Account:
         return bool(self.experiment_design.get("blind_prompt", False))
 
     @property
+    def show_feed_position(self) -> bool:
+        """`sockpuppet_config.show_feed_position`: tell the model where each
+        post sits in the feed it was loaded with ("post 2 of 20"). The
+        runtime makes one LLM call per post, so without this the model has no
+        way to follow a persona rule about ordinal position, e.g. "engage
+        with the 2nd post you see every time the feed is loaded". Off by
+        default so existing experiments' prompts are unchanged; the position
+        is written to every runtime_log row either way.
+        """
+        return bool(self.sockpuppet_config.get("show_feed_position", False))
+
+    @property
     def randomization_method(self) -> str:
         return (self.experiment_design.get("randomization") or {}).get("method")
 

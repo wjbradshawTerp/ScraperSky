@@ -1,0 +1,13 @@
+{
+    "_comment": "D1, D2: Democratic national news. Followed by Democrat-persona accounts. From the persona-conjoint spec's seed-follow table.",
+    "users": [
+        {
+            "user_id": "2836421",
+            "_comment": "MSNBC"
+        },
+        {
+            "user_id": "14377605",
+            "_comment": "TheDemocrats"
+        }
+    ]
+}

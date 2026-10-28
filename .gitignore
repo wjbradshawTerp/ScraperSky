@@ -11,6 +11,15 @@ accounts.yaml
 # the shape. (follow_user_ids.json is committed -- it's just a follow list,
 # it makes no claim about the accounts in it.)
 untrustworthy_sources.json
+
+# Persona-conjoint study (generate_personas.py): the generated signup sheet
+# regenerates exactly from its seed (see signup_sheet.meta.json), and
+# curl_dumps/ is where to keep the cURL commands you copy for
+# register_persona_account.py -- every one of them holds LIVE credentials,
+# so nothing in it may ever be committed.
+signup_sheet.csv
+signup_sheet.meta.json
+curl_dumps/
 # Backups of accounts.yaml carry the same live credentials as the original.
 accounts.yaml.bak*
 # Output of extract_account_tokens.py -- holds live auth/csrf tokens.
