@@ -85,6 +85,11 @@ def split_curl_blocks(text):
 def extract_one(block_text):
     """Pulls the four credential fields out of one cURL command's text.
     Returns (fields_dict, missing_list)."""
+    # The bearer token contains a literal `%`, which each Windows copy writes
+    # differently: cmd `%%`, Chrome `^%^3D`, Firefox `"%"3D`. The last two would
+    # cut the token short at the caret/quote, so undo the escaping first (no real
+    # token contains `^`, and `"%"` only ever stands for a literal `%`).
+    block_text = block_text.replace("^", "").replace('"%"', "%")
     auth_token = _AUTH_TOKEN.search(block_text)
     bearer = _BEARER.search(block_text)
     # Prefer the explicit csrf header; fall back to the ct0 cookie, which
